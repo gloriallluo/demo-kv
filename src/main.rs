@@ -1,8 +1,14 @@
 //! kv-cli
 
-use std::{io, str::FromStr};
+use demo_kv::KVHandle;
+use std::{io, path::PathBuf, str::FromStr};
+use structopt::StructOpt;
 
-use demo_kv::KV;
+#[derive(Debug, StructOpt)]
+struct Opt {
+    #[structopt(short, long, parse(from_os_str), default_value = "./data/dkv.db")]
+    mount_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Copy)]
 enum PutStmt {
@@ -98,10 +104,12 @@ impl FromStr for Command {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
+    let opt = Opt::from_args();
     let mut buffer = String::new();
-    let kv = KV::default();
+    let kv = KVHandle::new(opt.mount_path).await;
     while io::stdin().read_line(&mut buffer).is_ok() {
         if buffer.as_str() == "exit\n" {
             break;
