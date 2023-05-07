@@ -1,0 +1,2 @@
+GET A
+GET B

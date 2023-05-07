@@ -1,0 +1,2 @@
+PUT A 0
+PUT B 0
