@@ -6,10 +6,19 @@ authors = ["Jingjia Luo <jingjia_luo@163.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "demo-serv"
+path = "src/server.rs"
+
+[[bin]]
+name = "demo-cli"
+path = "src/client.rs"
+
 [dependencies]
 bincode = "1.3"
 env_logger = "0.10"
 log = "0.4"
+prost = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 structopt = "0.3"
 tokio = { version = "1.28", features = [
@@ -18,3 +27,7 @@ tokio = { version = "1.28", features = [
     "time",
     "fs"
 ] }
+tonic = "0.9"
+
+[build-dependencies]
+tonic-build = "0.9"

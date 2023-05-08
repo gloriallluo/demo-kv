@@ -30,11 +30,11 @@ impl KVHandle {
         this
     }
 
-    pub fn get(&self, key: char) -> Option<u64> {
+    pub fn get(&self, key: char) -> Option<i64> {
         self.inner.read().unwrap().get(key)
     }
 
-    pub fn put(&self, key: char, value: u64) {
+    pub fn put(&self, key: char, value: i64) {
         self.inner.write().unwrap().put(key, value)
     }
 
@@ -59,15 +59,15 @@ impl KVHandle {
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct KVInner {
-    data: HashMap<char, u64>,
+    data: HashMap<char, i64>,
 }
 
 impl KVInner {
-    fn get(&self, key: char) -> Option<u64> {
+    fn get(&self, key: char) -> Option<i64> {
         self.data.get(&key).copied()
     }
 
-    fn put(&mut self, key: char, value: u64) {
+    fn put(&mut self, key: char, value: i64) {
         // TODO add WAL
         self.data.insert(key, value);
     }

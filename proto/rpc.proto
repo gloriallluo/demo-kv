@@ -1,0 +1,45 @@
+syntax = "proto3";
+package demokv.api;
+
+service Kv {
+    // Get a key-value pair
+    rpc Get(GetArg) returns (GetReply);
+
+    // Put a key-value pair
+    rpc Put(PutArg) returns (PutReply);
+
+    // Inc a key's value
+    rpc Inc(IncArg) returns (IncReply);
+
+    // Delete a key-value pair
+    rpc Del(DelArg) returns (DelReply);
+}
+
+message GetArg {
+    int32 key = 1;
+}
+
+message GetReply {
+    bool has_value = 1;
+    int64 value = 2;
+}
+
+message PutArg {
+    int32 key = 1;
+    int64 value = 2;
+}
+
+message PutReply {}
+
+message IncArg {
+    int32 key = 1;
+    int64 value = 2;
+}
+
+message IncReply {}
+
+message DelArg {
+    int32 key = 1;
+}
+
+message DelReply {}

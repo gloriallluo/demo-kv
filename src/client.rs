@@ -1,23 +1,32 @@
 //! kv-cli
 
-use demo_kv::KVHandle;
-use std::{io, path::PathBuf, str::FromStr};
-use structopt::StructOpt;
+use std::error::Error as StdError;
+use std::fmt;
+use std::{io, str::FromStr};
+use tonic::Request;
 
-#[derive(Debug, StructOpt)]
-struct Opt {
-    #[structopt(short, long, parse(from_os_str), default_value = "./data/dkv.db")]
-    mount_path: PathBuf,
+mod api {
+    tonic::include_proto!("demokv.api");
 }
+
+use api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg};
 
 #[derive(Debug, Clone, Copy)]
 enum PutStmt {
-    Val(u64),
-    Incr(u64),
+    Val(i64),
+    Incr(i64),
 }
 
 #[derive(Debug)]
 struct ParseCommandError;
+
+impl fmt::Display for ParseCommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("command parse error")
+    }
+}
+
+impl StdError for ParseCommandError {}
 
 #[derive(Debug, Clone, Copy)]
 enum Command {
@@ -34,7 +43,7 @@ impl FromStr for Command {
             .split(char::is_whitespace)
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
-        log::trace!("Got commands: {cmds:?}");
+        log::trace!("input: {cmds:?}");
         match cmds[0] {
             "GET" => {
                 if cmds.len() != 2 {
@@ -59,11 +68,14 @@ impl FromStr for Command {
                     return Err(ParseCommandError);
                 }
                 let key = cmds[1].chars().next().ok_or(ParseCommandError)?;
-                if let Ok(v) = cmds[2].parse::<u64>() {
+                if let Ok(val) = cmds[2].parse::<i64>() {
                     log::trace!("PutStmt::Val");
-                    let stmt = PutStmt::Val(v);
-                    Ok(Command::Put { key, stmt })
+                    Ok(Command::Put {
+                        key,
+                        stmt: PutStmt::Val(val),
+                    })
                 } else {
+                    // may be a incr statement
                     log::trace!("PutStmt::Incr");
                     let (key2, inc) = cmds[2]
                         .strip_prefix('(')
@@ -78,9 +90,11 @@ impl FromStr for Command {
                     if key2 != key {
                         return Err(ParseCommandError);
                     }
-                    let i = inc.parse::<u64>().map_err(|_| ParseCommandError)?;
-                    let stmt = PutStmt::Incr(i);
-                    Ok(Command::Put { key, stmt })
+                    let inc = inc.parse::<i64>().map_err(|_| ParseCommandError)?;
+                    Ok(Command::Put {
+                        key,
+                        stmt: PutStmt::Incr(inc),
+                    })
                 }
             }
             "DEL" => {
@@ -105,33 +119,52 @@ impl FromStr for Command {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
-    let opt = Opt::from_args();
+
+    let mut client = KvClient::connect("127.0.0.1:33333").await?;
+
     let mut buffer = String::new();
-    let kv = KVHandle::new(opt.mount_path).await;
     while io::stdin().read_line(&mut buffer).is_ok() {
         if buffer.as_str() == "exit\n" {
             break;
         }
-        let command = buffer.as_str().parse().unwrap();
+        let command = buffer.as_str().parse()?;
+        log::debug!("command: {command:?}");
         match command {
             Command::Get { key } => {
-                if let Some(res) = kv.get(key) {
-                    println!("{res}");
+                let arg = Request::new(GetArg { key: key as _ });
+                let reply = client.get(arg).await?.into_inner();
+
+                if reply.has_value {
+                    println!("{}", reply.value);
                 } else {
-                    println!("None");
+                    log::error!("None");
                 }
             }
             Command::Put { key, stmt } => match stmt {
-                PutStmt::Val(val) => kv.put(key, val),
-                PutStmt::Incr(inc) => {
-                    let orig = kv.get(key).unwrap();
-                    kv.put(key, orig + inc);
+                PutStmt::Val(value) => {
+                    let arg = Request::new(PutArg {
+                        key: key as _,
+                        value,
+                    });
+                    client.put(arg).await?.into_inner();
+                }
+                PutStmt::Incr(value) => {
+                    let arg = Request::new(IncArg {
+                        key: key as _,
+                        value,
+                    });
+                    client.inc(arg).await?.into_inner();
                 }
             },
-            Command::Del { key } => kv.del(key),
+
+            Command::Del { key } => {
+                let arg = Request::new(DelArg { key: key as _ });
+                let _res = client.del(arg).await?.into_inner();
+            }
         };
         buffer.clear();
     }
+    Ok(())
 }
