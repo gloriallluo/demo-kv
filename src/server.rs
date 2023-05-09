@@ -19,6 +19,7 @@ struct Opt {
 async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
     let addr = "127.0.0.1:33333".parse()?;
+    log::info!("Server listen at {addr:?}");
     let opt = Opt::from_args();
     let handle = KVHandle::new(opt.snapshot_path).await;
     Server::builder()

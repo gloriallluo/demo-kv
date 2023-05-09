@@ -3,4 +3,4 @@ PUT A (A+1)
 PUT B (B+1)
 PUT A (B+1)
 PUT B (A+1)
-COMMIT 
+COMMIT

@@ -44,6 +44,9 @@ impl FromStr for Command {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>();
         log::trace!("input: {cmds:?}");
+        if cmds.is_empty() {
+            return Err(ParseCommandError);
+        }
         match cmds[0] {
             "GET" => {
                 if cmds.len() != 2 {
@@ -71,10 +74,10 @@ impl FromStr for Command {
                     let (key2, inc) = cmds[2]
                         .strip_prefix('(')
                         .and_then(|s| s.strip_suffix(')'))
-                        .and_then(|s| s.split_once('+'))
+                        .and_then(|s| s.split_once(|c| c == '+' || c == '-'))
                         .ok_or(ParseCommandError)?;
                     if key2 != key.as_str() {
-                        log::error!("Only inc on the same key is supported");
+                        log::error!("Only modification on the same key is supported");
                         return Err(ParseCommandError);
                     }
                     let inc = inc.parse::<i64>().map_err(|_| ParseCommandError)?;
@@ -108,19 +111,19 @@ async fn main() -> Result<(), Box<dyn StdError>> {
 
     let mut buffer = String::new();
     while io::stdin().read_line(&mut buffer).is_ok() {
-        if buffer.as_str() == "exit\n" {
+        if buffer.is_empty() || buffer.as_str() == "exit\n" {
             break;
         }
         if let Ok(command) = buffer.as_str().parse() {
             log::debug!("command: {command:?}");
             match command {
                 Command::Get { key } => {
-                    let arg = Request::new(GetArg { key });
+                    let arg = Request::new(GetArg { key: key.clone() });
                     let reply = client.get(arg).await?.into_inner();
                     if reply.has_value {
-                        println!("{}", reply.value);
+                        println!("{key}: {}", reply.value);
                     } else {
-                        eprintln!("None");
+                        eprintln!("{key}: None");
                     }
                 }
                 Command::Put { key, stmt } => match stmt {
