@@ -28,11 +28,11 @@ impl fmt::Display for ParseCommandError {
 
 impl StdError for ParseCommandError {}
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Command {
-    Get { key: char },
-    Put { key: char, stmt: PutStmt },
-    Del { key: char },
+    Get { key: String },
+    Put { key: String, stmt: PutStmt },
+    Del { key: String },
 }
 
 impl FromStr for Command {
@@ -50,24 +50,15 @@ impl FromStr for Command {
                     log::error!("Invalid arg length, should be 2");
                     return Err(ParseCommandError);
                 }
-                if cmds[1].len() == 1 {
-                    let key = cmds[1].chars().next().ok_or(ParseCommandError)?;
-                    Ok(Command::Get { key })
-                } else {
-                    log::error!("Invalid key length");
-                    Err(ParseCommandError)
-                }
+                let key = cmds[1].to_string();
+                Ok(Command::Get { key })
             }
             "PUT" => {
                 if cmds.len() != 3 {
                     log::error!("Invalid arg length, should be 3");
                     return Err(ParseCommandError);
                 }
-                if cmds[1].len() != 1 {
-                    log::error!("Invalid key length");
-                    return Err(ParseCommandError);
-                }
-                let key = cmds[1].chars().next().ok_or(ParseCommandError)?;
+                let key = cmds[1].to_string();
                 if let Ok(val) = cmds[2].parse::<i64>() {
                     log::trace!("PutStmt::Val");
                     Ok(Command::Put {
@@ -82,12 +73,8 @@ impl FromStr for Command {
                         .and_then(|s| s.strip_suffix(')'))
                         .and_then(|s| s.split_once('+'))
                         .ok_or(ParseCommandError)?;
-                    if key2.len() != 1 {
-                        log::error!("Invalid key length");
-                        return Err(ParseCommandError);
-                    }
-                    let key2 = key2.chars().next().ok_or(ParseCommandError)?;
-                    if key2 != key {
+                    if key2 != key.as_str() {
+                        log::error!("Only inc on the same key is supported");
                         return Err(ParseCommandError);
                     }
                     let inc = inc.parse::<i64>().map_err(|_| ParseCommandError)?;
@@ -102,13 +89,8 @@ impl FromStr for Command {
                     log::error!("Invalid arg length, should be 2");
                     return Err(ParseCommandError);
                 }
-                if cmds[1].len() == 1 {
-                    let key = cmds[1].chars().next().ok_or(ParseCommandError)?;
-                    Ok(Command::Del { key })
-                } else {
-                    log::error!("Invalid key length");
-                    Err(ParseCommandError)
-                }
+                let key = cmds[1].to_string();
+                Ok(Command::Del { key })
             }
             cmd => {
                 log::error!("Unknown command {cmd}");
@@ -122,49 +104,43 @@ impl FromStr for Command {
 async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
 
-    let mut client = KvClient::connect("127.0.0.1:33333").await?;
+    let mut client = KvClient::connect("http://127.0.0.1:33333").await?;
 
     let mut buffer = String::new();
     while io::stdin().read_line(&mut buffer).is_ok() {
         if buffer.as_str() == "exit\n" {
             break;
         }
-        let command = buffer.as_str().parse()?;
-        log::debug!("command: {command:?}");
-        match command {
-            Command::Get { key } => {
-                let arg = Request::new(GetArg { key: key as _ });
-                let reply = client.get(arg).await?.into_inner();
+        if let Ok(command) = buffer.as_str().parse() {
+            log::debug!("command: {command:?}");
+            match command {
+                Command::Get { key } => {
+                    let arg = Request::new(GetArg { key });
+                    let reply = client.get(arg).await?.into_inner();
+                    if reply.has_value {
+                        println!("{}", reply.value);
+                    } else {
+                        eprintln!("None");
+                    }
+                }
+                Command::Put { key, stmt } => match stmt {
+                    PutStmt::Val(value) => {
+                        let arg = Request::new(PutArg { key, value });
+                        client.put(arg).await?.into_inner();
+                    }
+                    PutStmt::Incr(value) => {
+                        let arg = Request::new(IncArg { key, value });
+                        client.inc(arg).await?.into_inner();
+                    }
+                },
 
-                if reply.has_value {
-                    println!("{}", reply.value);
-                } else {
-                    log::error!("None");
+                Command::Del { key } => {
+                    let arg = Request::new(DelArg { key });
+                    let _res = client.del(arg).await?.into_inner();
                 }
-            }
-            Command::Put { key, stmt } => match stmt {
-                PutStmt::Val(value) => {
-                    let arg = Request::new(PutArg {
-                        key: key as _,
-                        value,
-                    });
-                    client.put(arg).await?.into_inner();
-                }
-                PutStmt::Incr(value) => {
-                    let arg = Request::new(IncArg {
-                        key: key as _,
-                        value,
-                    });
-                    client.inc(arg).await?.into_inner();
-                }
-            },
-
-            Command::Del { key } => {
-                let arg = Request::new(DelArg { key: key as _ });
-                let _res = client.del(arg).await?.into_inner();
-            }
-        };
-        buffer.clear();
+            };
+            buffer.clear();
+        }
     }
     Ok(())
 }
