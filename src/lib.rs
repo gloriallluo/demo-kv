@@ -1,12 +1,12 @@
 //! demo-kv
 
 #![deny(clippy::all)]
+#![feature(sync_unsafe_cell)]
 
+mod log;
 mod state;
 pub use state::KVHandle;
 
-mod api {
+pub mod api {
     tonic::include_proto!("demokv.api");
 }
-pub use api::kv_client::KvClient;
-pub use api::kv_server::KvServer;

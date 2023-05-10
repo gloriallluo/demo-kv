@@ -1,15 +1,10 @@
 //! kv-cli
 
+use demo_kv::api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg};
 use std::error::Error as StdError;
 use std::fmt;
 use std::{io, str::FromStr};
 use tonic::Request;
-
-mod api {
-    tonic::include_proto!("demokv.api");
-}
-
-use api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg};
 
 #[derive(Debug, Clone, Copy)]
 enum PutStmt {
@@ -136,7 +131,6 @@ async fn main() -> Result<(), Box<dyn StdError>> {
                         client.inc(arg).await?.into_inner();
                     }
                 },
-
                 Command::Del { key } => {
                     let arg = Request::new(DelArg { key });
                     let _res = client.del(arg).await?.into_inner();

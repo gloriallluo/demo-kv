@@ -1,15 +1,16 @@
 //! KV instance.
 
-use crate::api::{
-    kv_server::Kv, DelArg, DelReply, GetArg, GetReply, IncArg, IncReply, PutArg, PutReply,
+use crate::{
+    api::{kv_server::Kv, DelArg, DelReply, GetArg, GetReply, IncArg, IncReply, PutArg, PutReply},
+    log::{LogCommand, LogOp, Loggable, Logger},
 };
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{atomic::AtomicBool, Arc, RwLock},
     time::Duration,
 };
-use tokio::{fs, task, time};
+use tokio::{sync::{mpsc, Notify}, task, time};
 use tonic::{Request, Response, Status};
 
 #[derive(Debug, Clone)]
@@ -56,15 +57,21 @@ impl Kv for KVHandle {
 
     async fn del(&self, req: Request<DelArg>) -> Result<Response<DelReply>, Status> {
         let DelArg { key } = req.into_inner();
-        self.inner.write().unwrap().del(&key);
+        self.inner.write().unwrap().del(key);
         let reply = DelReply {};
         Ok(Response::new(reply))
     }
 }
 
 impl KVHandle {
-    pub async fn new(mount_path: PathBuf) -> Self {
-        let kv = Self::restore(&mount_path).await.unwrap_or_default();
+    pub async fn new(mount_path: PathBuf, log_path: PathBuf) -> Self {
+        // XXX piece of shit
+        let (mut kv, logger) = if let Some(res) = Self::restore(&mount_path).await {
+            res
+        } else {
+            KVInner::new(&log_path).await
+        };
+        logger.restore(&mut kv).await;
         let this = Self {
             inner: Arc::new(RwLock::new(kv)),
         };
@@ -79,38 +86,91 @@ impl KVHandle {
         this
     }
 
-    async fn restore(path: &Path) -> Option<KVInner> {
-        let data = fs::read(path).await.ok()?;
-        bincode::deserialize::<KVInner>(&data[..]).ok()
+    async fn restore(_path: &Path) -> Option<(KVInner, Arc<Logger>)> {
+        // TODO snapshot
+        // let data = fs::read(path).await.ok()?;
+        // bincode::deserialize::<KVInner>(&data[..]).ok()
+        None
     }
 
-    async fn persist(&self, path: &Path) {
-        // XXX too much unwrap
-        let data = {
-            let kv = self.inner.read().unwrap();
-            bincode::serialize(&*kv).unwrap()
-        };
-        fs::write(path, &data[..]).await.unwrap();
+    async fn persist(&self, _path: &Path) {
+        // TODO snapshot
+        // let data = {
+        //     let kv = self.inner.read().unwrap();
+        //     bincode::serialize(&*kv).unwrap()
+        // };
+        // fs::write(path, &data[..]).await.unwrap();
     }
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug)]
 struct KVInner {
-    data: HashMap<String, i64>,
+    data: HashMap<String, Versions>,
+    log_tx: mpsc::UnboundedSender<LogCommand>,
 }
 
 impl KVInner {
+    async fn new(log_path: &Path) -> (Self, Arc<Logger>) {
+        let (logger, log_tx) = Logger::new(&log_path).await;
+        let me = Self {
+            data: HashMap::default(),
+            log_tx,
+        };
+        (me, logger)
+    }
+
     fn get(&self, key: &String) -> Option<i64> {
-        self.data.get(key).copied()
+        self.data.get(key)?.get_latest()
     }
 
     fn put(&mut self, key: String, value: i64) {
-        // TODO add WAL
-        self.data.insert(key, value);
+        let op = LogOp { key: key.clone(), value: Some(value) };
+        let done = Arc::new(Notify::new());
+        self.log_tx.send(LogCommand { op, done: Arc::clone(&done) }).unwrap();
+        self.data.entry(key).or_default().update(0, Some(value));
     }
 
-    fn del(&mut self, key: &String) {
-        // TODO add WAL
-        self.data.remove(key);
+    fn del(&mut self, key: String) {
+        let op = LogOp { key: key.clone(), value: None };
+        let done = Arc::new(Notify::new());
+        self.log_tx.send(LogCommand { op, done: Arc::clone(&done) }).unwrap();
+        self.data.entry(key).or_default().update(0, None);
+    }
+}
+
+impl Loggable for KVInner {
+    fn reply(&mut self, op: LogOp) {
+        let LogOp { key, value } = op;
+        if let Some(value) = value {
+            self.put(key, value);
+        } else {
+            self.del(key);
+        }
+    }
+}
+
+/// Multiple versions of a key.
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+struct Versions {
+    /// A lock.
+    updating: AtomicBool,
+    /// Sorted by version number.
+    versions: Vec<(usize, Option<i64>)>,
+}
+
+impl Versions {
+    fn get_latest(&self) -> Option<i64> {
+        // XXX to be deprecated
+        todo!()
+    }
+
+    #[allow(dead_code)]
+    fn get_version(&self, _version: usize) -> Option<i64> {
+        todo!()
+    }
+
+    fn update(&self, _version: usize, _value: Option<i64>) {
+        todo!()
     }
 }
