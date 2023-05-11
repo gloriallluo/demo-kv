@@ -1,5 +1,6 @@
 //! Logging module
 
+use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::{
@@ -26,8 +27,9 @@ pub(crate) struct Logger {
     log_file: Mutex<File>, // XXX serialized
 }
 
+#[async_trait]
 pub(crate) trait Loggable {
-    fn reply(&mut self, op: LogOp);
+    async fn replay(&mut self, op: LogOp);
 }
 
 impl Logger {
@@ -48,13 +50,13 @@ impl Logger {
         (this, tx)
     }
 
-    pub(crate) async fn restore(self: Arc<Self>, state: &mut impl Loggable) {
+    pub(crate) async fn restore(self: &Arc<Self>, state: &mut impl Loggable) {
         let mut f = self.log_file.lock().await;
         while let Ok(sz) = f.read_u64().await {
             let mut buffer = vec![0u8; sz as usize];
             f.read_exact(&mut buffer[..]).await.unwrap();
             let op: LogOp = bincode::deserialize(&buffer[..]).unwrap();
-            state.reply(op);
+            state.replay(op).await;
         }
     }
 

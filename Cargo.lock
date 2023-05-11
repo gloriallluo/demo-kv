@@ -157,6 +157,7 @@ dependencies = [
 name = "demo-kv"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "bincode",
  "env_logger",
  "log",

@@ -5,8 +5,10 @@
 
 mod log;
 mod state;
+
 pub use state::KVHandle;
 
+/// tonic APIs
 pub mod api {
     tonic::include_proto!("demokv.api");
 }
