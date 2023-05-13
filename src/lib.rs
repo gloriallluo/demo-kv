@@ -5,6 +5,7 @@
 
 mod log;
 mod state;
+mod ts;
 
 pub use state::KVHandle;
 

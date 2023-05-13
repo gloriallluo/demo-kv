@@ -14,6 +14,7 @@ use tokio::{
 pub(crate) struct LogOp {
     pub(crate) key: String,
     pub(crate) value: Option<i64>,
+    pub(crate) ts: usize,
 }
 
 #[derive(Debug)]

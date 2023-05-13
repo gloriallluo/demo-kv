@@ -3,16 +3,13 @@
 use crate::{
     api::{kv_server::Kv, DelArg, DelReply, GetArg, GetReply, IncArg, IncReply, PutArg, PutReply},
     log::{LogCommand, LogOp, Loggable, Logger},
+    ts::TS_MANAGER,
 };
 use async_trait::async_trait;
+use concurrent_map::ConcurrentMap;
 use std::{
-    cell::SyncUnsafeCell,
-    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, AtomicUsize},
-        Arc, RwLock,
-    },
+    sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -28,11 +25,14 @@ pub struct KVHandle {
     _logger: Arc<Logger>,
 }
 
+unsafe impl Sync for KVHandle {}
+
 #[tonic::async_trait]
 impl Kv for KVHandle {
     async fn get(&self, req: Request<GetArg>) -> Result<Response<GetReply>, Status> {
         let GetArg { key } = req.into_inner();
-        let reply = if let Some(value) = self.inner.get(&key) {
+        let ts = TS_MANAGER.new_ts();
+        let reply = if let Some(value) = self.inner.get(key, ts) {
             GetReply {
                 has_value: true,
                 value,
@@ -48,15 +48,17 @@ impl Kv for KVHandle {
 
     async fn put(&self, req: Request<PutArg>) -> Result<Response<PutReply>, Status> {
         let PutArg { key, value } = req.into_inner();
-        self.inner.put(key, value).await;
+        let ts = TS_MANAGER.new_ts();
+        self.inner.put(key, value, ts).await;
         let reply = PutReply {};
         Ok(Response::new(reply))
     }
 
     async fn inc(&self, req: Request<IncArg>) -> Result<Response<IncReply>, Status> {
         let IncArg { key, value } = req.into_inner();
-        let reply = if let Some(orig) = self.inner.get(&key) {
-            self.inner.put(key, orig + value).await;
+        let ts = TS_MANAGER.new_ts();
+        let reply = if let Some(orig) = self.inner.get(key.clone(), ts) {
+            self.inner.put(key, orig + value, ts).await;
             IncReply { has_value: true }
         } else {
             IncReply { has_value: false }
@@ -66,7 +68,8 @@ impl Kv for KVHandle {
 
     async fn del(&self, req: Request<DelArg>) -> Result<Response<DelReply>, Status> {
         let DelArg { key } = req.into_inner();
-        self.inner.del(key).await;
+        let ts = TS_MANAGER.new_ts();
+        self.inner.del(key, ts).await;
         let reply = DelReply {};
         Ok(Response::new(reply))
     }
@@ -115,31 +118,35 @@ impl KVHandle {
     }
 }
 
+type KeyVersion = (String, usize);
+
 /// Real KV instance.
 ///
 /// It should not expose any functions that requires to be called with a `&mut self`.
 #[derive(Debug)]
 struct KVInner {
-    data: RwLock<HashMap<String, Versions>>, // TODO remove lock !!
+    // data: RwLock<HashMap<String, Versions>>,
+    data: ConcurrentMap<KeyVersion, Option<i64>>,
     log_tx: mpsc::UnboundedSender<LogCommand>,
 }
 
 impl KVInner {
     async fn new(log_tx: mpsc::UnboundedSender<LogCommand>) -> Self {
         Self {
-            data: RwLock::new(HashMap::new()),
+            data: ConcurrentMap::default(),
             log_tx,
         }
     }
 
-    fn get(&self, key: &String) -> Option<i64> {
-        self.data.read().unwrap().get(key)?.get_latest()
+    fn get(&self, key: String, ts: usize) -> Option<i64> {
+        self.data.get_lt(&(key, ts)).map(|v| v.1)?
     }
 
-    async fn put(&self, key: String, value: i64) {
+    async fn put(&self, key: String, value: i64, ts: usize) {
         let op = LogOp {
             key: key.clone(),
             value: Some(value),
+            ts,
         };
         let done = Arc::new(Notify::new());
         self.log_tx
@@ -149,18 +156,14 @@ impl KVInner {
             })
             .unwrap();
         done.notified().await;
-        self.data
-            .write()
-            .unwrap()
-            .entry(key)
-            .or_default()
-            .update(0, Some(value));
+        self.data.insert((key, ts), Some(value));
     }
 
-    async fn del(&self, key: String) {
+    async fn del(&self, key: String, ts: usize) {
         let op = LogOp {
             key: key.clone(),
             value: None,
+            ts,
         };
         let done = Arc::new(Notify::new());
         self.log_tx
@@ -170,64 +173,18 @@ impl KVInner {
             })
             .unwrap();
         done.notified().await;
-        if let Some(versions) = self.data.read().unwrap().get(&key) {
-            versions.update(0, None);
-        }
+        self.data.insert((key, ts), None);
     }
 }
 
 #[async_trait]
 impl Loggable for KVInner {
     async fn replay(&mut self, op: LogOp) {
-        let LogOp { key, value } = op;
+        let LogOp { key, value, ts } = op;
         if let Some(value) = value {
-            self.put(key, value).await;
+            self.put(key, value, ts).await;
         } else {
-            self.del(key).await;
+            self.del(key, ts).await;
         }
-    }
-}
-
-#[allow(dead_code)]
-/// Max number of versions.
-const MAX_VERSION_NUM: usize = 0x100;
-
-type SingleVersion = Option<(usize, Option<i64>)>;
-
-/// Multiple versions of a key.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct Versions {
-    /// A lock.
-    updating: AtomicBool,
-    /// A index.
-    size: AtomicUsize,
-    /// Sorted by version number.
-    versions: Vec<SyncUnsafeCell<SingleVersion>>,
-}
-
-impl Default for Versions {
-    fn default() -> Self {
-        Self {
-            updating: AtomicBool::new(false),
-            size: AtomicUsize::new(0),
-            versions: Default::default(),
-        }
-    }
-}
-
-impl Versions {
-    // XXX to be deprecated
-    fn get_latest(&self) -> Option<i64> {
-        todo!()
-    }
-
-    #[allow(dead_code)] // TODO use timestamp
-    fn get_version(&self, _version: usize) -> Option<i64> {
-        todo!()
-    }
-
-    fn update(&self, _version: usize, _value: Option<i64>) {
-        todo!()
     }
 }
