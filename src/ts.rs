@@ -15,4 +15,8 @@ impl TsManager {
     pub(crate) fn new_ts(&self) -> usize {
         self.ts.fetch_add(1, Ordering::SeqCst)
     }
+
+    pub(crate) fn set_ts(&self, ts: usize) {
+        self.ts.store(ts, Ordering::Release);
+    }
 }

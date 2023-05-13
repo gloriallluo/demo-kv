@@ -17,13 +17,13 @@ struct Opt {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
-    let addr = "127.0.0.1:33333".parse()?;
-    log::info!("Server listen at {addr:?}");
+    let addr = "0.0.0.0:33333".parse()?;
     let opt = Opt::from_args();
     let handle = KVHandle::new(opt.snapshot_path, opt.log_path).await;
     Server::builder()
         .add_service(KvServer::new(handle))
         .serve(addr)
         .await?;
+    log::info!("Server listen at {addr:?}");
     Ok(())
 }

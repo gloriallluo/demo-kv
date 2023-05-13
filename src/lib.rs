@@ -1,13 +1,12 @@
 //! demo-kv
 
 #![deny(clippy::all)]
-#![feature(sync_unsafe_cell)]
 
+mod kv;
 mod log;
-mod state;
 mod ts;
 
-pub use state::KVHandle;
+pub use kv::KVHandle;
 
 /// tonic APIs
 pub mod api {

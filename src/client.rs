@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
 
     let mut buffer = String::new();
     while io::stdin().read_line(&mut buffer).is_ok() {
-        if buffer.is_empty() || buffer.as_str() == "exit\n" {
+        if buffer.is_empty() || buffer.as_str() == "exit\n" || buffer.as_str() == "exit\t\n" {
             break;
         }
         if let Ok(command) = buffer.as_str().parse() {
@@ -136,8 +136,8 @@ async fn main() -> Result<(), Box<dyn StdError>> {
                     let _res = client.del(arg).await?.into_inner();
                 }
             };
-            buffer.clear();
         }
+        buffer.clear();
     }
     Ok(())
 }

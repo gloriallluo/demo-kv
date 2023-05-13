@@ -5,7 +5,6 @@ use crate::{
     log::{LogCommand, LogOp, Loggable, Logger},
     ts::TS_MANAGER,
 };
-use async_trait::async_trait;
 use concurrent_map::ConcurrentMap;
 use std::{
     path::{Path, PathBuf},
@@ -81,14 +80,14 @@ impl KVHandle {
         // Get a Logger first.
         let (logger, tx) = Logger::new(&log_path).await;
         // Try to restore from snapshot.
-        let mut kv = if let Some(kv) = Self::restore(&mount_path, &tx).await {
+        let kv = if let Some(kv) = Self::restore(&mount_path, &tx).await {
             kv
         } else {
-            KVInner::new(tx).await
+            KVInner::new(tx)
         };
 
         // Replay log.
-        logger.restore(&mut kv).await;
+        logger.restore(&kv);
         let this = Self {
             inner: Arc::new(kv),
             _logger: logger,
@@ -131,7 +130,7 @@ struct KVInner {
 }
 
 impl KVInner {
-    async fn new(log_tx: mpsc::UnboundedSender<LogCommand>) -> Self {
+    fn new(log_tx: mpsc::UnboundedSender<LogCommand>) -> Self {
         Self {
             data: ConcurrentMap::default(),
             log_tx,
@@ -139,7 +138,8 @@ impl KVInner {
     }
 
     fn get(&self, key: String, ts: usize) -> Option<i64> {
-        self.data.get_lt(&(key, ts)).map(|v| v.1)?
+        log::trace!("get key={key} ts={ts}");
+        self.data.get_lt(&(key, ts))?.1
     }
 
     async fn put(&self, key: String, value: i64, ts: usize) {
@@ -148,6 +148,7 @@ impl KVInner {
             value: Some(value),
             ts,
         };
+        log::trace!("put key={key} value={value} ts={ts}");
         let done = Arc::new(Notify::new());
         self.log_tx
             .send(LogCommand {
@@ -165,6 +166,7 @@ impl KVInner {
             value: None,
             ts,
         };
+        log::trace!("del key={key} ts={ts}");
         let done = Arc::new(Notify::new());
         self.log_tx
             .send(LogCommand {
@@ -177,14 +179,9 @@ impl KVInner {
     }
 }
 
-#[async_trait]
 impl Loggable for KVInner {
-    async fn replay(&mut self, op: LogOp) {
+    fn replay(&self, op: LogOp) {
         let LogOp { key, value, ts } = op;
-        if let Some(value) = value {
-            self.put(key, value, ts).await;
-        } else {
-            self.del(key, ts).await;
-        }
+        self.data.insert((key, ts), value);
     }
 }

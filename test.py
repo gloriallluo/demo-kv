@@ -53,7 +53,7 @@ if __name__ == '__main__':
         for c in clients:
             c.wait()
 
-    serv.kill()  # XXX not working
+    serv.kill()
 
-    subprocess.run("killall demo-cli", shell=True)
-    subprocess.run("killall demo-serv", shell=True)
+    # subprocess.run("killall demo-cli", shell=True)
+    # subprocess.run("killall demo-serv", shell=True)

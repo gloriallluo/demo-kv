@@ -1,14 +1,17 @@
 //! Logging module
 
-use async_trait::async_trait;
-use std::path::Path;
-use std::sync::Arc;
-use tokio::{
+use std::{
     fs::File,
-    io::{AsyncReadExt, AsyncWriteExt},
-    sync::{mpsc, Mutex, Notify},
+    io::{Read, Seek, Write},
+    path::Path,
+    sync::{Arc, Mutex},
+};
+use tokio::{
+    sync::{mpsc, Notify},
     task,
 };
+
+use crate::ts::TS_MANAGER;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct LogOp {
@@ -28,14 +31,20 @@ pub(crate) struct Logger {
     log_file: Mutex<File>, // XXX serialized
 }
 
-#[async_trait]
 pub(crate) trait Loggable {
-    async fn replay(&mut self, op: LogOp);
+    fn replay(&self, op: LogOp);
 }
 
 impl Logger {
     pub(crate) async fn new(log_path: &Path) -> (Arc<Self>, mpsc::UnboundedSender<LogCommand>) {
-        let log_file = File::open(log_path).await.unwrap();
+        let mut log_file = if let Ok(file) = File::open(log_path) {
+            log::info!("open log file {log_path:?}");
+            file
+        } else {
+            log::info!("crate log file {log_path:?}");
+            File::create(log_path).unwrap()
+        };
+        log_file.seek(std::io::SeekFrom::Start(0)).unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let this = Arc::new(Self {
             log_file: Mutex::new(log_file),
@@ -44,27 +53,38 @@ impl Logger {
         task::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 let LogCommand { op, done } = cmd;
-                that.log(&op).await;
+                log::debug!("log recv new operation {op:?}");
+                that.log(&op);
                 done.notify_one();
             }
         });
         (this, tx)
     }
 
-    pub(crate) async fn restore(self: &Arc<Self>, state: &mut impl Loggable) {
-        let mut f = self.log_file.lock().await;
-        while let Ok(sz) = f.read_u64().await {
+    pub(crate) fn restore(self: &Arc<Self>, state: &impl Loggable) {
+        let mut f = self.log_file.lock().unwrap();
+        let mut u32_arr: [u8; 4] = [0; 4];
+        let mut max_ts = 0;
+        while f.read_exact(&mut u32_arr[..]).is_ok() {
+            let sz = u32::from_ne_bytes(u32_arr);
             let mut buffer = vec![0u8; sz as usize];
-            f.read_exact(&mut buffer[..]).await.unwrap();
+            (*f).read_exact(&mut buffer[..]).unwrap();
             let op: LogOp = bincode::deserialize(&buffer[..]).unwrap();
-            state.replay(op).await;
+            if op.ts > max_ts {
+                max_ts = op.ts;
+            }
+            log::debug!("log replay new operation {op:?}");
+            state.replay(op);
         }
+        TS_MANAGER.set_ts(max_ts + 1);
+        log::info!("log replay finish");
     }
 
-    async fn log(self: &Arc<Self>, op: &LogOp) {
+    fn log(self: &Arc<Self>, op: &LogOp) {
         let data = bincode::serialize(op).unwrap();
-        let mut f = self.log_file.lock().await;
-        f.write_u64(data.len() as _).await.unwrap();
-        f.write_all(&data).await.unwrap();
+        let u32_arr: [u8; 4] = (data.len() as u32).to_ne_bytes();
+        let mut f = self.log_file.lock().unwrap();
+        f.write_all(&u32_arr[..]).unwrap();
+        f.write_all(&data).unwrap();
     }
 }
