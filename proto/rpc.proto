@@ -18,7 +18,7 @@ service Kv {
     rpc ReadTxn(ReadArg) returns (ReadReply);
 
     // Validation & Commit phase
-    rpc CommitTxn(stream CommitArg) returns (CommitReply);
+    rpc CommitTxn(CommitArg) returns (CommitReply);
 }
 
 message GetArg {
@@ -65,9 +65,7 @@ message ReadReply {
 
 message CommitArg {
     int64 ts = 1;
-    string key = 2;
-    bool delete = 3;
-    int64 value = 4;
+    string write_set = 2;
 }
 
 message CommitReply {

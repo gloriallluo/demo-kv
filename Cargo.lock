@@ -240,6 +240,7 @@ dependencies = [
  "lazy_static",
  "log",
  "prost",
+ "rand",
  "serde",
  "structopt",
  "tokio",

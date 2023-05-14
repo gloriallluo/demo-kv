@@ -3,11 +3,7 @@
 use demo_kv::api::CommitArg;
 use demo_kv::api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg, ReadArg};
 use std::error::Error as StdError;
-use std::sync::Arc;
 use std::{collections::HashMap, fmt, io, str::FromStr};
-use tokio::sync::mpsc;
-use tokio::task;
-use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 
 #[derive(Debug, Clone, Copy)]
@@ -249,24 +245,14 @@ async fn main() -> Result<(), Box<dyn StdError>> {
                         ..
                     }) = txn_ctx
                     {
-                        let (tx, rx) = mpsc::channel(8);
-                        let write_set = Arc::new(write_set);
-                        let t = task::spawn(async move {
-                            for (k, v) in write_set.iter() {
-                                let arg = CommitArg {
-                                    ts: start_ts.unwrap_or(usize::MAX) as _,
-                                    key: k.clone(),
-                                    delete: v.is_none(),
-                                    value: v.unwrap_or(0),
-                                };
-                                tx.send(arg).await.expect("channel closed");
-                            }
+                        let write_set =
+                            bincode::serialize(&write_set).expect("failed to serialize");
+                        let arg = Request::new(CommitArg {
+                            ts: start_ts.unwrap_or(usize::MAX) as _,
+                            write_set: unsafe { String::from_utf8_unchecked(write_set) },
                         });
-                        t.await.expect("task aborted");
-                        let reply = client
-                            .commit_txn(ReceiverStream::new(rx))
-                            .await?
-                            .into_inner();
+
+                        let reply = client.commit_txn(arg).await?.into_inner();
                         if reply.commit {
                             println!("Transaction commit");
                         } else {

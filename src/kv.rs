@@ -10,6 +10,7 @@ use crate::{
 };
 use concurrent_map::ConcurrentMap;
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -18,7 +19,8 @@ use tokio::{
     sync::{mpsc, Notify},
     task, time,
 };
-use tonic::{Request, Response, Status, Streaming};
+// use tokio_stream::StreamExt;
+use tonic::{Request, Response, Status};
 
 /// KV Handle. It's a reference to `KVInner`.
 #[derive(Debug, Clone)]
@@ -48,7 +50,7 @@ impl Kv for KVHandle {
     async fn put(&self, req: Request<PutArg>) -> Result<Response<PutReply>, Status> {
         let PutArg { key, value } = req.into_inner();
         let ts = TS_MANAGER.new_ts();
-        self.inner.put(key, value, ts).await;
+        self.inner.update(key, Some(value), ts).await;
         let reply = PutReply {};
         Ok(Response::new(reply))
     }
@@ -57,7 +59,7 @@ impl Kv for KVHandle {
         let IncArg { key, value } = req.into_inner();
         let ts = TS_MANAGER.new_ts();
         let reply = if let Some(orig) = self.inner.get(key.clone(), ts) {
-            self.inner.put(key, orig + value, ts).await;
+            self.inner.update(key, Some(orig + value), ts).await;
             IncReply { has_value: true }
         } else {
             IncReply { has_value: false }
@@ -68,20 +70,73 @@ impl Kv for KVHandle {
     async fn del(&self, req: Request<DelArg>) -> Result<Response<DelReply>, Status> {
         let DelArg { key } = req.into_inner();
         let ts = TS_MANAGER.new_ts();
-        self.inner.del(key, ts).await;
+        self.inner.update(key, None, ts).await;
         let reply = DelReply {};
         Ok(Response::new(reply))
     }
 
-    async fn read_txn(&self, _req: Request<ReadArg>) -> Result<Response<ReadReply>, tonic::Status> {
-        todo!()
+    async fn read_txn(&self, req: Request<ReadArg>) -> Result<Response<ReadReply>, tonic::Status> {
+        let ReadArg { ts, key } = req.into_inner();
+        let ts = if ts == -1 {
+            TS_MANAGER.new_ts()
+        } else {
+            ts as _
+        };
+        let reply = if let Some(value) = self.inner.get(key, ts) {
+            ReadReply {
+                ts: ts as _,
+                has_value: true,
+                value,
+            }
+        } else {
+            ReadReply {
+                ts: ts as _,
+                has_value: false,
+                value: 0,
+            }
+        };
+        Ok(Response::new(reply))
     }
 
     async fn commit_txn(
         &self,
-        _req: Request<Streaming<CommitArg>>,
+        req: Request<CommitArg>,
     ) -> Result<Response<CommitReply>, tonic::Status> {
-        todo!()
+        let CommitArg { ts, write_set } = req.into_inner();
+
+        let txn_id = rand::random::<i64>(); // XXX collision
+        let start_ts = if ts == -1 {
+            TS_MANAGER.new_ts() // blind write
+        } else {
+            ts as _
+        };
+        let write_set: HashMap<String, Option<i64>> =
+            bincode::deserialize(write_set.as_bytes()).expect("failed to deserialize");
+        let mut commit = true;
+
+        // Lock and validate
+        for (key, _) in write_set.iter() {
+            self.inner.lock(key, txn_id);
+            if !self.inner.validate(key, start_ts) {
+                commit = false;
+                break;
+            }
+        }
+
+        // Commit
+        if commit {
+            let commit_ts = TS_MANAGER.new_ts();
+            for (key, value) in write_set.iter() {
+                self.inner.update(key.to_owned(), *value, commit_ts).await;
+            }
+        }
+
+        // Release locks
+        for (key, _) in write_set.iter() {
+            self.inner.unlock(key, txn_id);
+        }
+
+        Ok(Response::new(CommitReply { commit }))
     }
 }
 
@@ -152,8 +207,8 @@ impl KVInner {
         self.data.get_lt(&(key, ts))?.1
     }
 
-    #[allow(dead_code)] // TODO(txn)
     fn lock(&self, key: &String, txn_id: i64) {
+        // XXX wait or not
         while self
             .data
             .cas((key.to_owned(), Self::LOCK), None, Some(Some(txn_id)))
@@ -161,38 +216,26 @@ impl KVInner {
         {}
     }
 
-    #[allow(dead_code)] // TODO(txn)
     fn unlock(&self, key: &String, txn_id: i64) {
         self.data
             .cas((key.to_owned(), Self::LOCK), Some(&Some(txn_id)), None)
             .ok();
     }
 
-    async fn put(&self, key: String, value: i64, ts: usize) {
-        let op = LogOp {
-            key: key.clone(),
-            value: Some(value),
-            ts,
-        };
-        log::trace!("put key={key} value={value} ts={ts}");
-        let done = Arc::new(Notify::new());
-        self.log_tx
-            .send(LogCommand {
-                op,
-                done: Arc::clone(&done),
-            })
-            .expect("channel closed");
-        done.notified().await;
-        self.data.insert((key, ts), Some(value));
+    fn validate(&self, key: &String, start_ts: usize) -> bool {
+        if let Some(((ref k, ts), _)) = self.data.get_lt(&(key.to_owned(), Self::LOCK)) {
+            return k == key && ts < start_ts;
+        }
+        false
     }
 
-    async fn del(&self, key: String, ts: usize) {
+    async fn update(&self, key: String, value: Option<i64>, ts: usize) {
         let op = LogOp {
             key: key.clone(),
-            value: None,
+            value,
             ts,
         };
-        log::trace!("del key={key} ts={ts}");
+        log::trace!("update key={key} value={value:?} ts={ts}");
         let done = Arc::new(Notify::new());
         self.log_tx
             .send(LogCommand {
@@ -201,7 +244,7 @@ impl KVInner {
             })
             .expect("channel closed");
         done.notified().await;
-        self.data.insert((key, ts), None);
+        self.data.insert((key, ts), value);
     }
 }
 
