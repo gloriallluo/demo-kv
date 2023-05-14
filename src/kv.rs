@@ -1,7 +1,10 @@
 //! KV instance.
 
 use crate::{
-    api::{kv_server::Kv, DelArg, DelReply, GetArg, GetReply, IncArg, IncReply, PutArg, PutReply},
+    api::{
+        kv_server::Kv, CommitArg, CommitReply, DelArg, DelReply, GetArg, GetReply, IncArg,
+        IncReply, PutArg, PutReply, ReadArg, ReadReply,
+    },
     log::{LogCommand, LogOp, Loggable, Logger},
     ts::TS_MANAGER,
 };
@@ -15,7 +18,7 @@ use tokio::{
     sync::{mpsc, Notify},
     task, time,
 };
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 
 /// KV Handle. It's a reference to `KVInner`.
 #[derive(Debug, Clone)]
@@ -24,14 +27,11 @@ pub struct KVHandle {
     _logger: Arc<Logger>,
 }
 
-unsafe impl Sync for KVHandle {}
-
 #[tonic::async_trait]
 impl Kv for KVHandle {
     async fn get(&self, req: Request<GetArg>) -> Result<Response<GetReply>, Status> {
         let GetArg { key } = req.into_inner();
-        let ts = TS_MANAGER.new_ts();
-        let reply = if let Some(value) = self.inner.get(key, ts) {
+        let reply = if let Some(value) = self.inner.get(key, usize::MAX) {
             GetReply {
                 has_value: true,
                 value,
@@ -72,6 +72,17 @@ impl Kv for KVHandle {
         let reply = DelReply {};
         Ok(Response::new(reply))
     }
+
+    async fn read_txn(&self, _req: Request<ReadArg>) -> Result<Response<ReadReply>, tonic::Status> {
+        todo!()
+    }
+
+    async fn commit_txn(
+        &self,
+        _req: Request<Streaming<CommitArg>>,
+    ) -> Result<Response<CommitReply>, tonic::Status> {
+        todo!()
+    }
 }
 
 impl KVHandle {
@@ -107,29 +118,28 @@ impl KVHandle {
 
     /// Restore KV state from snapshot file. None if no snapshot available.
     async fn restore(_path: &Path, _tx: &mpsc::UnboundedSender<LogCommand>) -> Option<KVInner> {
-        // TODO snapshot restore
+        // TODO(snapshot) restore
         None
     }
 
     /// Dump snapshot.
     async fn persist(&self, _path: &Path) {
-        // TODO snapshot
+        // TODO(snapshot) persist
     }
 }
 
 type KeyVersion = (String, usize);
 
 /// Real KV instance.
-///
-/// It should not expose any functions that requires to be called with a `&mut self`.
 #[derive(Debug)]
 struct KVInner {
-    // data: RwLock<HashMap<String, Versions>>,
-    data: ConcurrentMap<KeyVersion, Option<i64>>,
+    data: ConcurrentMap<KeyVersion, Option<i64>>, // TODO(gc)
     log_tx: mpsc::UnboundedSender<LogCommand>,
 }
 
 impl KVInner {
+    const LOCK: usize = usize::MAX;
+
     fn new(log_tx: mpsc::UnboundedSender<LogCommand>) -> Self {
         Self {
             data: ConcurrentMap::default(),
@@ -140,6 +150,22 @@ impl KVInner {
     fn get(&self, key: String, ts: usize) -> Option<i64> {
         log::trace!("get key={key} ts={ts}");
         self.data.get_lt(&(key, ts))?.1
+    }
+
+    #[allow(dead_code)] // TODO(txn)
+    fn lock(&self, key: &String, txn_id: i64) {
+        while self
+            .data
+            .cas((key.to_owned(), Self::LOCK), None, Some(Some(txn_id)))
+            .is_err()
+        {}
+    }
+
+    #[allow(dead_code)] // TODO(txn)
+    fn unlock(&self, key: &String, txn_id: i64) {
+        self.data
+            .cas((key.to_owned(), Self::LOCK), Some(&Some(txn_id)), None)
+            .ok();
     }
 
     async fn put(&self, key: String, value: i64, ts: usize) {
@@ -155,7 +181,7 @@ impl KVInner {
                 op,
                 done: Arc::clone(&done),
             })
-            .unwrap();
+            .expect("channel closed");
         done.notified().await;
         self.data.insert((key, ts), Some(value));
     }
@@ -173,7 +199,7 @@ impl KVInner {
                 op,
                 done: Arc::clone(&done),
             })
-            .unwrap();
+            .expect("channel closed");
         done.notified().await;
         self.data.insert((key, ts), None);
     }

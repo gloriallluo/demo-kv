@@ -1,9 +1,13 @@
 //! kv-cli
 
-use demo_kv::api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg};
+use demo_kv::api::CommitArg;
+use demo_kv::api::{kv_client::KvClient, DelArg, GetArg, IncArg, PutArg, ReadArg};
 use std::error::Error as StdError;
-use std::fmt;
-use std::{io, str::FromStr};
+use std::sync::Arc;
+use std::{collections::HashMap, fmt, io, str::FromStr};
+use tokio::sync::mpsc;
+use tokio::task;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 
 #[derive(Debug, Clone, Copy)]
@@ -12,8 +16,18 @@ enum PutStmt {
     Incr(i64),
 }
 
+#[derive(Debug, Clone)]
+enum Command {
+    Start,
+    Commit,
+    Abort,
+    Get { key: String },
+    Put { key: String, stmt: PutStmt },
+    Del { key: String },
+}
+
 #[derive(Debug)]
-struct ParseCommandError;
+pub struct ParseCommandError;
 
 impl fmt::Display for ParseCommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -22,13 +36,6 @@ impl fmt::Display for ParseCommandError {
 }
 
 impl StdError for ParseCommandError {}
-
-#[derive(Debug, Clone)]
-enum Command {
-    Get { key: String },
-    Put { key: String, stmt: PutStmt },
-    Del { key: String },
-}
 
 impl FromStr for Command {
     type Err = ParseCommandError;
@@ -43,6 +50,9 @@ impl FromStr for Command {
             return Err(ParseCommandError);
         }
         match cmds[0] {
+            "START" => Ok(Command::Start),
+            "COMMIT" => Ok(Command::Commit),
+            "ABORT" => Ok(Command::Abort),
             "GET" => {
                 if cmds.len() != 2 {
                     log::error!("Invalid arg length, should be 2");
@@ -98,13 +108,22 @@ impl FromStr for Command {
     }
 }
 
-#[tokio::main]
+/// Ongoing transaction context used in client side.
+#[derive(Debug, Default)]
+struct TxnContext {
+    start_ts: Option<usize>,
+    read_set: HashMap<String, Option<i64>>,
+    write_set: HashMap<String, Option<i64>>,
+}
+
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
 
     let mut client = KvClient::connect("http://127.0.0.1:33333").await?;
 
     let mut buffer = String::new();
+    let mut txn_ctx: Option<TxnContext> = None;
     while io::stdin().read_line(&mut buffer).is_ok() {
         if buffer.is_empty() || buffer.as_str() == "exit\n" || buffer.as_str() == "exit\t\n" {
             break;
@@ -112,29 +131,151 @@ async fn main() -> Result<(), Box<dyn StdError>> {
         if let Ok(command) = buffer.as_str().parse() {
             log::debug!("command: {command:?}");
             match command {
+                Command::Start => txn_ctx = Some(TxnContext::default()),
                 Command::Get { key } => {
-                    let arg = Request::new(GetArg { key: key.clone() });
-                    let reply = client.get(arg).await?.into_inner();
-                    if reply.has_value {
-                        println!("{key}: {}", reply.value);
+                    if let Some(TxnContext {
+                        start_ts, read_set, ..
+                    }) = &mut txn_ctx
+                    {
+                        // Check read set first to achieve Repeatable Read.
+                        match read_set.get(&key) {
+                            Some(Some(v)) => println!("{key}: {v}"),
+                            Some(None) => eprintln!("{key}: None"),
+                            None => {
+                                let arg = Request::new(ReadArg {
+                                    ts: start_ts.unwrap_or(usize::MAX) as i64,
+                                    key: key.clone(),
+                                });
+                                let reply = client.read_txn(arg).await?.into_inner();
+                                // Print the value, update read set.
+                                if reply.has_value {
+                                    println!("{key}: {}", reply.value);
+                                    read_set.insert(key, Some(reply.value));
+                                } else {
+                                    eprintln!("{key}: None");
+                                    read_set.insert(key, None);
+                                }
+                                // Update start_ts acquired from server.
+                                if start_ts.is_none() {
+                                    *start_ts = Some(reply.ts as _);
+                                }
+                            }
+                        }
                     } else {
-                        eprintln!("{key}: None");
+                        let arg = Request::new(GetArg { key: key.clone() });
+                        let reply = client.get(arg).await?.into_inner();
+                        if reply.has_value {
+                            println!("{key}: {}", reply.value);
+                        } else {
+                            eprintln!("{key}: None");
+                        }
                     }
                 }
-                Command::Put { key, stmt } => match stmt {
-                    PutStmt::Val(value) => {
-                        let arg = Request::new(PutArg { key, value });
-                        client.put(arg).await?.into_inner();
+                Command::Put { key, stmt } => {
+                    if let Some(TxnContext {
+                        start_ts,
+                        read_set,
+                        write_set,
+                    }) = &mut txn_ctx
+                    {
+                        match stmt {
+                            PutStmt::Val(value) => {
+                                // Read my own writes.
+                                read_set.insert(key.clone(), Some(value));
+                                // Writes are buffered.
+                                write_set.insert(key, Some(value));
+                            }
+                            PutStmt::Incr(value) => {
+                                // Check read set first to achieve Repeatable Read.
+                                let orig = match read_set.get(&key) {
+                                    Some(Some(v)) => *v,
+                                    Some(None) => panic!("{key} does not exist"),
+                                    None => {
+                                        let arg = Request::new(ReadArg {
+                                            ts: start_ts.unwrap_or(usize::MAX) as i64,
+                                            key: key.clone(),
+                                        });
+                                        let reply = client.read_txn(arg).await?.into_inner();
+                                        // Print the value, update read set.
+                                        if reply.has_value {
+                                            read_set.insert(key.clone(), Some(reply.value));
+                                        } else {
+                                            panic!("{key} does not exist")
+                                        }
+                                        // Update start_ts acquired from server.
+                                        if start_ts.is_none() {
+                                            *start_ts = Some(reply.ts as _);
+                                        }
+                                        reply.value
+                                    }
+                                };
+                                // Read my own writes.
+                                read_set.insert(key.clone(), Some(orig + value));
+                                // Writes are buffered.
+                                write_set.insert(key, Some(orig + value));
+                            }
+                        }
+                    } else {
+                        match stmt {
+                            PutStmt::Val(value) => {
+                                let arg = Request::new(PutArg { key, value });
+                                client.put(arg).await?.into_inner();
+                            }
+                            PutStmt::Incr(value) => {
+                                let arg = Request::new(IncArg { key, value });
+                                client.inc(arg).await?.into_inner();
+                            }
+                        }
                     }
-                    PutStmt::Incr(value) => {
-                        let arg = Request::new(IncArg { key, value });
-                        client.inc(arg).await?.into_inner();
-                    }
-                },
+                }
                 Command::Del { key } => {
-                    let arg = Request::new(DelArg { key });
-                    let _res = client.del(arg).await?.into_inner();
+                    if let Some(TxnContext {
+                        read_set,
+                        write_set,
+                        ..
+                    }) = &mut txn_ctx
+                    {
+                        read_set.insert(key.clone(), None);
+                        write_set.insert(key, None);
+                    } else {
+                        let arg = Request::new(DelArg { key });
+                        let _res = client.del(arg).await?.into_inner();
+                    }
                 }
+                Command::Commit => {
+                    if let Some(TxnContext {
+                        start_ts,
+                        write_set,
+                        ..
+                    }) = txn_ctx
+                    {
+                        let (tx, rx) = mpsc::channel(8);
+                        let write_set = Arc::new(write_set);
+                        let t = task::spawn(async move {
+                            for (k, v) in write_set.iter() {
+                                let arg = CommitArg {
+                                    ts: start_ts.unwrap_or(usize::MAX) as _,
+                                    key: k.clone(),
+                                    delete: v.is_none(),
+                                    value: v.unwrap_or(0),
+                                };
+                                tx.send(arg).await.expect("channel closed");
+                            }
+                        });
+                        t.await.expect("task aborted");
+                        let reply = client
+                            .commit_txn(ReceiverStream::new(rx))
+                            .await?
+                            .into_inner();
+                        if reply.commit {
+                            println!("Transaction commit");
+                        } else {
+                            eprintln!("Transaction abort");
+                        }
+                        txn_ctx = None;
+                    }
+                }
+                Command::Abort => txn_ctx = None,
             };
         }
         buffer.clear();

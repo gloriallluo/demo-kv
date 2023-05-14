@@ -13,6 +13,12 @@ service Kv {
 
     // Delete a key-value pair
     rpc Del(DelArg) returns (DelReply);
+
+    // Read phase
+    rpc ReadTxn(ReadArg) returns (ReadReply);
+
+    // Validation & Commit phase
+    rpc CommitTxn(stream CommitArg) returns (CommitReply);
 }
 
 message GetArg {
@@ -45,3 +51,25 @@ message DelArg {
 }
 
 message DelReply {}
+
+message ReadArg {
+    int64 ts = 1;
+    string key = 2;
+}
+
+message ReadReply {
+    int64 ts = 1;
+    bool has_value = 2;
+    int64 value = 3;
+}
+
+message CommitArg {
+    int64 ts = 1;
+    string key = 2;
+    bool delete = 3;
+    int64 value = 4;
+}
+
+message CommitReply {
+    bool commit = 1;
+}
