@@ -14,7 +14,7 @@ enum PutStmt {
 
 #[derive(Debug, Clone)]
 enum Command {
-    Start,
+    Begin,
     Commit,
     Abort,
     Get { key: String },
@@ -46,7 +46,7 @@ impl FromStr for Command {
             return Err(ParseCommandError);
         }
         match cmds[0] {
-            "START" => Ok(Command::Start),
+            "BEGIN" => Ok(Command::Begin),
             "COMMIT" => Ok(Command::Commit),
             "ABORT" => Ok(Command::Abort),
             "GET" => {
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
         if let Ok(command) = buffer.as_str().parse() {
             log::debug!("command: {command:?}");
             match command {
-                Command::Start => txn_ctx = Some(TxnContext::default()),
+                Command::Begin => txn_ctx = Some(TxnContext::default()),
                 Command::Get { key } => {
                     if let Some(TxnContext {
                         start_ts, read_set, ..

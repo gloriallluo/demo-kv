@@ -76,6 +76,7 @@ impl Kv for KVHandle {
     }
 
     async fn read_txn(&self, req: Request<ReadArg>) -> Result<Response<ReadReply>, tonic::Status> {
+        log::debug!("read_txn arg {req:?}");
         let ReadArg { ts, key } = req.into_inner();
         let ts = if ts == -1 {
             TS_MANAGER.new_ts()
@@ -95,6 +96,7 @@ impl Kv for KVHandle {
                 value: 0,
             }
         };
+        log::debug!("read_txn reply {reply:?}");
         Ok(Response::new(reply))
     }
 
@@ -112,12 +114,14 @@ impl Kv for KVHandle {
         };
         let write_set: HashMap<String, Option<i64>> =
             bincode::deserialize(write_set.as_bytes()).expect("failed to deserialize");
+        log::debug!("commit_txn begin_ts={start_ts} write_set={write_set:?}");
         let mut commit = true;
 
         // Lock and validate
         for (key, _) in write_set.iter() {
             self.inner.lock(key, txn_id);
             if !self.inner.validate(key, start_ts) {
+                log::warn!("key {key} validation failed");
                 commit = false;
                 break;
             }
@@ -135,7 +139,7 @@ impl Kv for KVHandle {
         for (key, _) in write_set.iter() {
             self.inner.unlock(key, txn_id);
         }
-
+        log::debug!("commit_txn reply {commit}");
         Ok(Response::new(CommitReply { commit }))
     }
 }
@@ -224,9 +228,10 @@ impl KVInner {
 
     fn validate(&self, key: &String, start_ts: usize) -> bool {
         if let Some(((ref k, ts), _)) = self.data.get_lt(&(key.to_owned(), Self::LOCK)) {
-            return k == key && ts < start_ts;
+            log::debug!("validate key={k} ts={ts}");
+            return k != key || ts < start_ts;
         }
-        false
+        true
     }
 
     async fn update(&self, key: String, value: Option<i64>, ts: usize) {
