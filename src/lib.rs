@@ -2,6 +2,7 @@
 
 #![deny(clippy::all, clippy::unwrap_used)]
 
+pub mod cli;
 mod kv;
 mod log;
 mod ts;
