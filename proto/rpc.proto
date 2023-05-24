@@ -39,7 +39,8 @@ message PutReply {}
 
 message IncArg {
     string key = 1;
-    int64 value = 2;
+    string key1 = 2;
+    int64 value = 3;
 }
 
 message IncReply {

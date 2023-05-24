@@ -28,6 +28,7 @@ pub struct KVHandle {
 impl Kv for KVHandle {
     async fn get(&self, req: Request<GetArg>) -> Result<Response<GetReply>, Status> {
         let GetArg { key } = req.into_inner();
+        log::debug!("Get - {key}");
         let reply = if let Some(value) = self.inner.get(key, usize::MAX) {
             GetReply {
                 has_value: true,
@@ -39,11 +40,13 @@ impl Kv for KVHandle {
                 value: 0,
             }
         };
+        log::debug!("Get reply {reply:?}");
         Ok(Response::new(reply))
     }
 
     async fn put(&self, req: Request<PutArg>) -> Result<Response<PutReply>, Status> {
         let PutArg { key, value } = req.into_inner();
+        log::debug!("Put - {key}={value}");
         let ts = TS_MANAGER.new_ts();
         self.inner.update(key, Some(value), ts).await;
         let reply = PutReply {};
@@ -51,9 +54,10 @@ impl Kv for KVHandle {
     }
 
     async fn inc(&self, req: Request<IncArg>) -> Result<Response<IncReply>, Status> {
-        let IncArg { key, value } = req.into_inner();
+        let IncArg { key, key1, value } = req.into_inner();
+        log::debug!("Inc - {key}+={value}");
         let ts = TS_MANAGER.new_ts();
-        let reply = if let Some(orig) = self.inner.get(key.clone(), ts) {
+        let reply = if let Some(orig) = self.inner.get(key1.clone(), ts) {
             self.inner.update(key, Some(orig + value), ts).await;
             IncReply { has_value: true }
         } else {
@@ -64,6 +68,7 @@ impl Kv for KVHandle {
 
     async fn del(&self, req: Request<DelArg>) -> Result<Response<DelReply>, Status> {
         let DelArg { key } = req.into_inner();
+        log::debug!("Del - {key}");
         let ts = TS_MANAGER.new_ts();
         self.inner.update(key, None, ts).await;
         let reply = DelReply {};
@@ -71,8 +76,8 @@ impl Kv for KVHandle {
     }
 
     async fn read_txn(&self, req: Request<ReadArg>) -> Result<Response<ReadReply>, tonic::Status> {
-        log::debug!("read_txn arg {req:?}");
         let ReadArg { ts, key } = req.into_inner();
+        log::debug!("TxnRead - {key}@{ts}");
         let ts = if ts == -1 {
             TS_MANAGER.new_ts()
         } else {
@@ -101,7 +106,7 @@ impl Kv for KVHandle {
     ) -> Result<Response<CommitReply>, tonic::Status> {
         let CommitArg { ts, write_set } = req.into_inner();
 
-        let txn_id = rand::random::<i64>(); // XXX collision
+        let txn_id = rand::random::<i64>();
         let start_ts = if ts == -1 {
             TS_MANAGER.new_ts() // blind write
         } else {
@@ -109,12 +114,14 @@ impl Kv for KVHandle {
         };
         let write_set: HashMap<String, Option<i64>> =
             bincode::deserialize(write_set.as_bytes()).expect("failed to deserialize");
-        log::debug!("commit_txn begin_ts={start_ts} write_set={write_set:?}");
+        log::debug!("CommitTxn begin_ts={start_ts} write_set={write_set:?}");
         let mut commit = true;
 
         // Lock and validate
         for (key, _) in write_set.iter() {
+            log::trace!("before lock {key}");
             self.inner.lock(key, txn_id);
+            log::trace!("acquire lock {key}");
             if !self.inner.validate(key, start_ts) {
                 log::warn!("key {key} validation failed");
                 commit = false;
@@ -126,6 +133,7 @@ impl Kv for KVHandle {
         if commit {
             let commit_ts = TS_MANAGER.new_ts();
             for (key, value) in write_set.iter() {
+                // FIXME(txn) hold lock across `await`
                 self.inner.update(key.to_owned(), *value, commit_ts).await;
             }
         }
@@ -133,6 +141,7 @@ impl Kv for KVHandle {
         // Release locks
         for (key, _) in write_set.iter() {
             self.inner.unlock(key, txn_id);
+            log::trace!("release lock {key}");
         }
         log::debug!("commit_txn reply {commit}");
         Ok(Response::new(CommitReply { commit }))
@@ -203,11 +212,16 @@ impl KVInner {
 
     fn get(&self, key: String, ts: usize) -> Option<i64> {
         log::trace!("get key={key} ts={ts}");
-        self.data.get_lt(&(key, ts))?.1
+        let kt = &(key, ts);
+        let (k, v) = self.data.get_lt(kt)?;
+        if k.0 == kt.0 {
+            v
+        } else {
+            None
+        }
     }
 
     fn lock(&self, key: &String, txn_id: i64) {
-        // XXX wait or not
         while self
             .data
             .cas((key.to_owned(), Self::LOCK), None, Some(Some(txn_id)))

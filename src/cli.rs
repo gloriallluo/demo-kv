@@ -7,10 +7,10 @@ use crate::api::{kv_client::KvClient, CommitArg, DelArg, GetArg, IncArg, PutArg,
 use tonic::transport::Channel;
 use tonic::Request;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum PutStmt {
     Val(i64),
-    Incr(i64),
+    Incr(String, i64),
 }
 
 #[derive(Debug, Clone)]
@@ -81,19 +81,26 @@ impl FromStr for Command {
                 } else {
                     // may be a incr statement
                     log::trace!("PutStmt::Incr");
-                    let (key2, inc) = cmds[2]
+                    let mut neg = false;
+                    let (key1, inc) = cmds[2]
                         .strip_prefix('(')
                         .and_then(|s| s.strip_suffix(')'))
-                        .and_then(|s| s.split_once(|c| c == '+' || c == '-'))
+                        .and_then(|s| {
+                            s.split_once(|c| {
+                                if c == '-' {
+                                    neg = true;
+                                }
+                                c == '+' || c == '-'
+                            })
+                        })
                         .ok_or(ParseCommandError)?;
-                    if key2 != key.as_str() {
-                        log::error!("Only modification on the same key is supported");
-                        return Err(ParseCommandError);
+                    let mut inc = inc.parse::<i64>().map_err(|_| ParseCommandError)?;
+                    if neg {
+                        inc = inc.wrapping_neg();
                     }
-                    let inc = inc.parse::<i64>().map_err(|_| ParseCommandError)?;
                     Ok(Command::Put {
                         key,
-                        stmt: PutStmt::Incr(inc),
+                        stmt: PutStmt::Incr(key1.to_string(), inc),
                     })
                 }
             }
@@ -194,22 +201,22 @@ impl Client {
                     // Writes are buffered.
                     write_set.insert(key, Some(value));
                 }
-                PutStmt::Incr(value) => {
+                PutStmt::Incr(key1, value) => {
                     // Check read set first to achieve Repeatable Read.
-                    let orig = match read_set.get(&key) {
+                    let orig = match read_set.get(&key1) {
                         Some(Some(v)) => *v,
                         Some(None) => panic!("{key} does not exist"),
                         None => {
                             let arg = Request::new(ReadArg {
                                 ts: start_ts.unwrap_or(usize::MAX) as i64,
-                                key: key.clone(),
+                                key: key1.clone(),
                             });
                             let reply = self.kv_client.read_txn(arg).await?.into_inner();
                             // Print the value, update read set.
                             if reply.has_value {
-                                read_set.insert(key.clone(), Some(reply.value));
+                                read_set.insert(key1.clone(), Some(reply.value));
                             } else {
-                                panic!("{key} does not exist")
+                                panic!("{key1} does not exist")
                             }
                             // Update start_ts acquired from server.
                             if start_ts.is_none() {
@@ -230,8 +237,8 @@ impl Client {
                     let arg = Request::new(PutArg { key, value });
                     self.kv_client.put(arg).await?.into_inner();
                 }
-                PutStmt::Incr(value) => {
-                    let arg = Request::new(IncArg { key, value });
+                PutStmt::Incr(key1, value) => {
+                    let arg = Request::new(IncArg { key, key1, value });
                     self.kv_client.inc(arg).await?.into_inner();
                 }
             }

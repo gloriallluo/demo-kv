@@ -90,7 +90,7 @@ impl Logger {
         let data = bincode::serialize(op).expect("failed to serialize");
         let u32_arr: [u8; 4] = (data.len() as u32).to_ne_bytes();
         let mut f = self.log_file.lock().expect("log file lock poisoned");
-        f.write_all(&u32_arr[..]).expect("failed to write"); // BUG bad fd
+        f.write_all(&u32_arr[..]).expect("failed to write");
         f.write_all(&data).expect("failed to write");
     }
 }
