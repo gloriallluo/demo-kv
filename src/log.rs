@@ -1,7 +1,7 @@
 //! Logging module
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Seek, Write},
     path::Path,
     sync::{Arc, Mutex},
@@ -37,19 +37,23 @@ pub(crate) trait Loggable {
 
 impl Logger {
     pub(crate) async fn new(log_path: &Path) -> (Arc<Self>, mpsc::UnboundedSender<LogCommand>) {
-        let mut log_file = if let Ok(file) = File::open(log_path) {
+        let mut file = if let Ok(file) = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(false)
+            .open(log_path)
+        {
             log::info!("open log file {log_path:?}");
             file
         } else {
             log::info!("crate log file {log_path:?}");
             File::create(log_path).expect("failed to create log file")
         };
-        log_file
-            .seek(std::io::SeekFrom::Start(0))
+        file.seek(std::io::SeekFrom::Start(0))
             .expect("failed to seek");
         let (tx, mut rx) = mpsc::unbounded_channel();
         let this = Arc::new(Self {
-            log_file: Mutex::new(log_file),
+            log_file: Mutex::new(file),
         });
         let that = Arc::clone(&this);
         task::spawn(async move {
