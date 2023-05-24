@@ -23,7 +23,7 @@ enum Command {
     Del { key: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub enum KvOutput {
     Ok,
     Value(Option<i64>),

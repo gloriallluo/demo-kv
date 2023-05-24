@@ -9,12 +9,7 @@ use crate::{
     ts::TS_MANAGER,
 };
 use concurrent_map::ConcurrentMap;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, Notify},
     task, time,
@@ -146,11 +141,11 @@ impl Kv for KVHandle {
 
 impl KVHandle {
     /// Get a new instance of `KVHandle`.
-    pub async fn new(mount_path: PathBuf, log_path: PathBuf) -> Self {
+    pub async fn new(mount_path: &Path, log_path: &Path) -> Self {
         // Get a Logger first.
-        let (logger, tx) = Logger::new(&log_path).await;
+        let (logger, tx) = Logger::new(log_path).await;
         // Try to restore from snapshot.
-        let kv = if let Some(kv) = Self::restore(&mount_path, &tx).await {
+        let kv = if let Some(kv) = Self::restore(mount_path, &tx).await {
             kv
         } else {
             KVInner::new(tx)
@@ -165,8 +160,8 @@ impl KVHandle {
 
         // Spawn a task that does persisting.
         let that = this.clone();
+        let path = mount_path.to_path_buf();
         task::spawn(async move {
-            let path = mount_path;
             loop {
                 time::sleep(Duration::from_millis(100)).await;
                 that.persist(&path).await;

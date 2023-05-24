@@ -1,4 +1,5 @@
 //! Server cli tool
+#![cfg(not(test))]
 
 use demo_kv::{api::kv_server::KvServer, KVHandle};
 use std::error::Error as StdError;
@@ -19,7 +20,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
     let addr = "0.0.0.0:33333".parse()?;
     let opt = Opt::from_args();
-    let handle = KVHandle::new(opt.snapshot_path, opt.log_path).await;
+    let handle = KVHandle::new(&opt.snapshot_path, &opt.log_path).await;
     Server::builder()
         .add_service(KvServer::new(handle))
         .serve(addr)

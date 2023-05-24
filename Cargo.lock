@@ -369,6 +369,7 @@ dependencies = [
  "futures-core",
  "lazy_static",
  "log",
+ "madsim",
  "madsim-tokio",
  "madsim-tonic",
  "madsim-tonic-build",
@@ -376,6 +377,7 @@ dependencies = [
  "rand",
  "serde",
  "structopt",
+ "tempfile",
  "tokio-stream",
 ]
 

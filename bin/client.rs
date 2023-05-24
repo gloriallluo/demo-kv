@@ -1,4 +1,5 @@
 //! kv-cli
+#![cfg(not(test))]
 
 use demo_kv::cli::{Client, KvOutput};
 use std::error::Error as StdError;
