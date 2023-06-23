@@ -10,7 +10,13 @@ use madsim::{
     task::{self, JoinHandle},
     time,
 };
-use std::{error::Error as StdError, path::Path, sync::Once, time::Duration};
+use std::{
+    error::Error as StdError,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+    sync::Once,
+    time::Duration,
+};
 use tempfile::{tempdir, TempDir};
 use tokio::join;
 use tonic::transport::Server;
@@ -31,9 +37,9 @@ fn logger_setup() {
 }
 
 impl TestEnv {
-    async fn init() -> Result<Self, Box<dyn StdError>> {
+    async fn init(port: u16) -> Result<Self, Box<dyn StdError>> {
         let dir = tempdir().unwrap();
-        let task = Self::start_server(dir.path());
+        let task = Self::start_server(port, dir.path());
         time::sleep(Duration::from_millis(200)).await;
         Ok(Self {
             dir,
@@ -41,8 +47,8 @@ impl TestEnv {
         })
     }
 
-    async fn restart(&mut self) {
-        let task = Self::start_server(self.dir.path());
+    async fn restart(&mut self, port: u16) {
+        let task = Self::start_server(port, self.dir.path());
         self.server = Some(task);
         time::sleep(Duration::from_millis(200)).await;
     }
@@ -52,8 +58,8 @@ impl TestEnv {
         time::sleep(Duration::from_millis(200)).await;
     }
 
-    fn start_server(dir: &Path) -> JoinHandle<()> {
-        let addr = "0.0.0.0:33333".parse().unwrap();
+    fn start_server(port: u16, dir: &Path) -> JoinHandle<()> {
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let dir = dir.to_path_buf();
         task::spawn(async move {
             let handle = KVHandle::new(
@@ -73,7 +79,7 @@ impl TestEnv {
 #[madsim::test]
 async fn basic() {
     logger_setup();
-    let _env = TestEnv::init().await.unwrap();
+    let _env = TestEnv::init(33333).await.unwrap();
     let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
     _ = cli.handle("PUT A 3").await.unwrap();
     _ = cli.handle("PUT B 4").await.unwrap();
@@ -98,8 +104,8 @@ async fn basic() {
 #[madsim::test]
 async fn persist() {
     logger_setup();
-    let mut env = TestEnv::init().await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+    let mut env = TestEnv::init(33334).await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33334").await.unwrap();
     _ = cli.handle("PUT A 5").await.unwrap();
     let res = cli.handle("GET A").await.unwrap();
     assert_eq!(res, KvOutput::Value(Some(5)));
@@ -111,8 +117,8 @@ async fn persist() {
     drop(cli);
     env.kill().await;
 
-    env.restart().await;
-    let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+    env.restart(33334).await;
+    let mut cli = Client::new("http://127.0.0.1:33334").await.unwrap();
     let res = cli.handle("GET A").await.unwrap();
     assert_eq!(res, KvOutput::Value(Some(5)), "persistence failed");
     let res = cli.handle("GET B").await.unwrap();
@@ -123,7 +129,7 @@ async fn persist() {
 async fn concurrent() {
     fn client_future(key1: &'static str, key2: &'static str) -> impl Future<Output = ()> + 'static {
         async move {
-            let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33335").await.unwrap();
             for _ in 0..10 {
                 _ = cli
                     .handle(format!("PUT {} 1", key1).as_str())
@@ -160,7 +166,7 @@ async fn concurrent() {
     }
 
     logger_setup();
-    let _env = TestEnv::init().await.unwrap();
+    let _env = TestEnv::init(33335).await.unwrap();
     let fut1 = task::spawn(client_future("A", "B"));
     let fut2 = task::spawn(client_future("C", "D"));
     let fut3 = task::spawn(client_future("E", "F"));
@@ -170,8 +176,8 @@ async fn concurrent() {
 #[madsim::test]
 async fn txn1() {
     logger_setup();
-    let _env = TestEnv::init().await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+    let _env = TestEnv::init(33336).await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33336").await.unwrap();
     _ = cli.handle("PUT A 0").await.unwrap();
     _ = cli.handle("PUT B 0").await.unwrap();
 
@@ -179,7 +185,7 @@ async fn txn1() {
 
     for _ in 0..3 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33336").await.unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 _ = cli.handle("PUT A (A+1)").await.unwrap();
@@ -223,8 +229,8 @@ async fn txn1() {
 #[madsim::test]
 async fn txn2() {
     logger_setup();
-    let _env = TestEnv::init().await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+    let _env = TestEnv::init(33337).await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33337").await.unwrap();
     _ = cli.handle("PUT A 0").await.unwrap();
     _ = cli.handle("PUT B 0").await.unwrap();
 
@@ -232,7 +238,7 @@ async fn txn2() {
 
     for _ in 0..2 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33337").await.unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 _ = cli.handle("PUT A (A+1)").await.unwrap();
@@ -246,7 +252,7 @@ async fn txn2() {
 
     for _ in 0..8 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33337 ").await.unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 let res0 = cli.handle("GET A").await.unwrap();
