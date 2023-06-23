@@ -6,10 +6,6 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use tokio::{
-    sync::{mpsc, Notify},
-    task,
-};
 
 use crate::ts::TS_MANAGER;
 
@@ -18,12 +14,6 @@ pub(crate) struct LogOp {
     pub(crate) key: String,
     pub(crate) value: Option<i64>,
     pub(crate) ts: usize,
-}
-
-#[derive(Debug)]
-pub(crate) struct LogCommand {
-    pub(crate) op: LogOp,
-    pub(crate) done: Arc<Notify>,
 }
 
 #[derive(Debug)]
@@ -36,7 +26,7 @@ pub(crate) trait Loggable {
 }
 
 impl Logger {
-    pub(crate) async fn new(log_path: &Path) -> (Arc<Self>, mpsc::UnboundedSender<LogCommand>) {
+    pub(crate) async fn new(log_path: &Path) -> Arc<Self> {
         let mut file = if let Ok(file) = OpenOptions::new()
             .read(true)
             .append(true)
@@ -51,20 +41,9 @@ impl Logger {
         };
         file.seek(std::io::SeekFrom::Start(0))
             .expect("failed to seek");
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let this = Arc::new(Self {
+        Arc::new(Self {
             log_file: Mutex::new(file),
-        });
-        let that = Arc::clone(&this);
-        task::spawn(async move {
-            while let Some(cmd) = rx.recv().await {
-                let LogCommand { op, done } = cmd;
-                log::debug!("log recv new operation {op:?}");
-                that.log(&op);
-                done.notify_one();
-            }
-        });
-        (this, tx)
+        })
     }
 
     pub(crate) fn restore(self: &Arc<Self>, state: &impl Loggable) {
@@ -86,7 +65,7 @@ impl Logger {
         log::info!("log replay finish");
     }
 
-    fn log(self: &Arc<Self>, op: &LogOp) {
+    pub(crate) fn log(self: &Arc<Self>, op: &LogOp) {
         let data = bincode::serialize(op).expect("failed to serialize");
         let u32_arr: [u8; 4] = (data.len() as u32).to_ne_bytes();
         let mut f = self.log_file.lock().expect("log file lock poisoned");

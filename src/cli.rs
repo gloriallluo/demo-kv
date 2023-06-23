@@ -289,7 +289,7 @@ impl Client {
 
     pub async fn handle(&mut self, cmd: &str) -> Result<KvOutput, Box<dyn StdError>> {
         let cmd: Command = cmd.parse()?;
-        log::debug!("command: {cmd:?}");
+        log::trace!("command: {cmd:?}");
         let output = match cmd {
             Command::Begin => {
                 self.txn_ctx = Some(TxnContext::default());

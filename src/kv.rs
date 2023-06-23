@@ -5,15 +5,12 @@ use crate::{
         kv_server::Kv, CommitArg, CommitReply, DelArg, DelReply, GetArg, GetReply, IncArg,
         IncReply, PutArg, PutReply, ReadArg, ReadReply,
     },
-    log::{LogCommand, LogOp, Loggable, Logger},
+    log::{LogOp, Loggable, Logger},
     ts::TS_MANAGER,
 };
 use concurrent_map::ConcurrentMap;
 use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
-use tokio::{
-    sync::{mpsc, Notify},
-    task, time,
-};
+use tokio::{task, time};
 // use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
 
@@ -21,7 +18,6 @@ use tonic::{Request, Response, Status};
 #[derive(Debug, Clone)]
 pub struct KVHandle {
     inner: Arc<KVInner>,
-    _logger: Arc<Logger>,
 }
 
 #[tonic::async_trait]
@@ -48,7 +44,7 @@ impl Kv for KVHandle {
         let PutArg { key, value } = req.into_inner();
         log::debug!("Put - {key}={value}");
         let ts = TS_MANAGER.new_ts();
-        self.inner.update(key, Some(value), ts).await;
+        self.inner.update(key, Some(value), ts);
         let reply = PutReply {};
         Ok(Response::new(reply))
     }
@@ -57,8 +53,8 @@ impl Kv for KVHandle {
         let IncArg { key, key1, value } = req.into_inner();
         log::debug!("Inc - {key}+={value}");
         let ts = TS_MANAGER.new_ts();
-        let reply = if let Some(orig) = self.inner.get(key1.clone(), ts) {
-            self.inner.update(key, Some(orig + value), ts).await;
+        let reply = if let Some(orig) = self.inner.get(key1, ts) {
+            self.inner.update(key, Some(orig + value), ts);
             IncReply { has_value: true }
         } else {
             IncReply { has_value: false }
@@ -70,7 +66,7 @@ impl Kv for KVHandle {
         let DelArg { key } = req.into_inner();
         log::debug!("Del - {key}");
         let ts = TS_MANAGER.new_ts();
-        self.inner.update(key, None, ts).await;
+        self.inner.update(key, None, ts);
         let reply = DelReply {};
         Ok(Response::new(reply))
     }
@@ -114,28 +110,37 @@ impl Kv for KVHandle {
         };
         let write_set: HashMap<String, Option<i64>> =
             bincode::deserialize(write_set.as_bytes()).expect("failed to deserialize");
+        let mut write_set = write_set.into_iter().collect::<Vec<_>>();
+        write_set.sort();
         log::debug!("CommitTxn begin_ts={start_ts} write_set={write_set:?}");
         let mut commit = true;
 
         // Lock and validate
         for (key, _) in write_set.iter() {
             log::trace!("before lock {key}");
-            self.inner.lock(key, txn_id);
+            if !self.inner.lock(key, txn_id) {
+                commit = false;
+                break;
+            }
             log::trace!("acquire lock {key}");
             if !self.inner.validate(key, start_ts) {
-                log::warn!("key {key} validation failed");
+                // log::warn!("key {key} validation failed");
                 commit = false;
                 break;
             }
         }
 
-        // Commit
-        if commit {
-            let commit_ts = TS_MANAGER.new_ts();
-            for (key, value) in write_set.iter() {
-                // FIXME(txn) hold lock across `await`
-                self.inner.update(key.to_owned(), *value, commit_ts).await;
+        if !commit {
+            for (key, _) in write_set.iter() {
+                self.inner.unlock(key, txn_id);
+                log::trace!("release lock {key}");
             }
+            return Ok(Response::new(CommitReply { commit }));
+        }
+
+        let commit_ts = TS_MANAGER.new_ts();
+        for (key, value) in write_set.iter() {
+            self.inner.update(key.to_owned(), *value, commit_ts);
         }
 
         // Release locks
@@ -152,19 +157,18 @@ impl KVHandle {
     /// Get a new instance of `KVHandle`.
     pub async fn new(mount_path: &Path, log_path: &Path) -> Self {
         // Get a Logger first.
-        let (logger, tx) = Logger::new(log_path).await;
+        let logger = Logger::new(log_path).await;
         // Try to restore from snapshot.
-        let kv = if let Some(kv) = Self::restore(mount_path, &tx).await {
+        let kv = if let Some(kv) = Self::restore(mount_path, &logger).await {
             kv
         } else {
-            KVInner::new(tx)
+            KVInner::new(Arc::clone(&logger))
         };
 
         // Replay log.
         logger.restore(&kv);
         let this = Self {
             inner: Arc::new(kv),
-            _logger: logger,
         };
 
         // Spawn a task that does persisting.
@@ -180,7 +184,7 @@ impl KVHandle {
     }
 
     /// Restore KV state from snapshot file. None if no snapshot available.
-    async fn restore(_path: &Path, _tx: &mpsc::UnboundedSender<LogCommand>) -> Option<KVInner> {
+    async fn restore(_path: &Path, _logger: &Arc<Logger>) -> Option<KVInner> {
         // TODO(snapshot) restore
         None
     }
@@ -197,16 +201,16 @@ type KeyVersion = (String, usize);
 #[derive(Debug)]
 struct KVInner {
     data: ConcurrentMap<KeyVersion, Option<i64>>, // TODO(gc)
-    log_tx: mpsc::UnboundedSender<LogCommand>,
+    logger: Arc<Logger>,
 }
 
 impl KVInner {
     const LOCK: usize = usize::MAX;
 
-    fn new(log_tx: mpsc::UnboundedSender<LogCommand>) -> Self {
+    fn new(logger: Arc<Logger>) -> Self {
         Self {
             data: ConcurrentMap::default(),
-            log_tx,
+            logger,
         }
     }
 
@@ -221,12 +225,10 @@ impl KVInner {
         }
     }
 
-    fn lock(&self, key: &String, txn_id: i64) {
-        while self
-            .data
+    fn lock(&self, key: &String, txn_id: i64) -> bool {
+        self.data
             .cas((key.to_owned(), Self::LOCK), None, Some(Some(txn_id)))
-            .is_err()
-        {}
+            .is_ok()
     }
 
     fn unlock(&self, key: &String, txn_id: i64) {
@@ -243,21 +245,14 @@ impl KVInner {
         true
     }
 
-    async fn update(&self, key: String, value: Option<i64>, ts: usize) {
+    fn update(&self, key: String, value: Option<i64>, ts: usize) {
         let op = LogOp {
             key: key.clone(),
             value,
             ts,
         };
         log::trace!("update key={key} value={value:?} ts={ts}");
-        let done = Arc::new(Notify::new());
-        self.log_tx
-            .send(LogCommand {
-                op,
-                done: Arc::clone(&done),
-            })
-            .expect("channel closed");
-        done.notified().await;
+        self.logger.log(&op);
         self.data.insert((key, ts), value);
     }
 }
