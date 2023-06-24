@@ -1,0 +1,20 @@
+syntax = "proto3";
+package demokv.peers;
+
+service Peers {
+    rpc Update(UpdateArg) returns (UpdateReply);
+    rpc Snapshot(SnapshotArg) returns (SnapshotReply);
+}
+
+message UpdateArg {
+    int64 ts = 1;
+    string key = 2;
+    bool has_value = 3;
+    int64 value = 4;
+}
+
+message UpdateReply {}
+
+message SnapshotArg {}
+
+message SnapshotReply {}

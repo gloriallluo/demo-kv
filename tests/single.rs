@@ -59,10 +59,11 @@ impl TestEnv {
     }
 
     fn start_server(port: u16, dir: &Path) -> JoinHandle<()> {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         let dir = dir.to_path_buf();
         task::spawn(async move {
             let handle = KVHandle::new(
+                &addr,
                 dir.join("test.dkv.db").as_path(),
                 dir.join("test.dkv.log").as_path(),
             )

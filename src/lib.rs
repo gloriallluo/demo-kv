@@ -14,3 +14,8 @@ pub use kv::KVHandle;
 pub mod api {
     tonic::include_proto!("demokv.api");
 }
+
+#[allow(clippy::unwrap_used)]
+pub mod peers {
+    tonic::include_proto!("demokv.peers");
+}
