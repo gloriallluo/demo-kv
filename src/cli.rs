@@ -272,7 +272,7 @@ impl Client {
             let write_set = bincode::serialize(&write_set).expect("failed to serialize");
             let arg = Request::new(CommitArg {
                 ts: start_ts.unwrap_or(usize::MAX) as _,
-                write_set: unsafe { String::from_utf8_unchecked(write_set) },
+                write_set,
             });
             self.txn_ctx = None;
 

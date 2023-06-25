@@ -167,9 +167,7 @@ impl KVHandle {
                                     .expect("failed to connect to peer");
                                 let snapshot = that.take_snapshot();
                                 let message = bincode::serialize(&snapshot).unwrap();
-                                let arg = SnapshotArg {
-                                    message: unsafe { String::from_utf8_unchecked(message) },
-                                };
+                                let arg = SnapshotArg { message };
                                 cli.snapshot(arg).await.expect("failed to install snapshot");
                             }
                         }
@@ -319,7 +317,7 @@ impl Kv for KVHandle {
             ts as _
         };
         let write_set: HashMap<String, Option<i64>> =
-            bincode::deserialize(write_set.as_bytes()).expect("failed to deserialize");
+            bincode::deserialize(&write_set[..]).expect("failed to deserialize");
         let mut write_set = write_set.into_iter().collect::<Vec<_>>();
         write_set.sort();
         log::debug!("CommitTxn begin_ts={start_ts} write_set={write_set:?}");
@@ -387,7 +385,6 @@ impl Peers for KVHandle {
         req: Request<SnapshotArg>,
     ) -> Result<Response<SnapshotReply>, tonic::Status> {
         let SnapshotArg { message } = req.into_inner();
-        let message = message.into_bytes();
         let kvs: HashMap<(String, usize), Option<i64>> =
             bincode::deserialize(&message[..]).unwrap();
         let mut max_ts = 0;

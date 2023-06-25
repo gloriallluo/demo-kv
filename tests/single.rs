@@ -238,7 +238,6 @@ async fn txn1() {
     let res0 = cli.handle("GET A").await.unwrap();
     let res1 = cli.handle("GET B").await.unwrap();
     assert_eq!(res0, res1);
-    log::info!("A={res0:?} B={res1:?}");
 }
 
 #[madsim::test]
