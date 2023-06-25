@@ -13,12 +13,10 @@ use crate::{
     ts::TS_MANAGER,
 };
 use concurrent_map::ConcurrentMap;
-use etcd::{self, members};
+use etcd_client::{Client as EtcdClient, GetOptions};
 use futures::{stream::FuturesUnordered, StreamExt};
-use hyper::{client::HttpConnector, rt::Future};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -30,18 +28,24 @@ use tokio::{task, time};
 use tonic::{Request, Response, Status};
 
 /// KV Handle. It's a reference to `KVInner`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KVHandle {
     inner: Arc<KVInner>,
-    me: String,
+    /// etcd id
+    me: u64,
     is_leader: Arc<AtomicBool>,
-    etcd_client: etcd::Client<HttpConnector>,
-    peer_addr: Arc<RwLock<Vec<SocketAddr>>>,
+    etcd_client: Option<EtcdClient>,
+    peer_addr: Arc<RwLock<Vec<String>>>,
 }
 
 impl KVHandle {
     /// Get a new instance of `KVHandle`.
-    pub async fn new(peer_addr: &SocketAddr, mount_path: &Path, log_path: &Path) -> Self {
+    pub async fn new(
+        distributed: bool,
+        peer_addr: &str,
+        mount_path: &Path,
+        log_path: &Path,
+    ) -> Self {
         // Get a Logger first.
         let logger = Logger::new(log_path).await;
         // Try to restore from snapshot.
@@ -54,26 +58,37 @@ impl KVHandle {
         // Replay log.
         logger.restore(&kv);
 
-        // etcd stuff
-        let etcd_client =
-            etcd::Client::new(&["127.0.0.1:2379"], None).expect("failed to connect to etcd");
-        members::add(&etcd_client, vec![peer_addr.to_string()])
-            .wait()
-            .expect("failed to add membership");
-        let peers = members::list(&etcd_client)
-            .wait()
-            .expect("failed to ask membership")
-            .data;
-        let position = peers
-            .iter()
-            .position(|m| m.peer_urls[0] == peer_addr.to_string())
-            .expect("failed to add membership");
-        let (me, is_leader) = (peers[position].id.to_owned(), position == 0);
-        let peer_addr = peers
-            .into_iter()
-            .filter(|m| m.id != me)
-            .map(|m| m.peer_urls[0].parse().expect("address parse error"))
-            .collect::<Vec<SocketAddr>>();
+        let (me, is_leader, peer_addr, etcd_client) = if distributed {
+            // etcd stuff
+            let mut etcd_client = EtcdClient::connect(&["http://127.0.0.1:2379"], None)
+                .await
+                .expect("failed to connect to etcd");
+            let me = rand::random::<u64>();
+            etcd_client
+                .put(me.to_string(), peer_addr.to_string(), None)
+                .await
+                .expect("failed to add membership");
+            time::sleep(Duration::from_millis(200)).await;
+            let peers_resp = etcd_client
+                .get("", Some(GetOptions::new().with_all_keys()))
+                .await
+                .expect("failed to ask membership");
+            let peers = peers_resp.kvs();
+            let position = peers
+                .iter()
+                .position(|m| m.key_str().unwrap() == me.to_string())
+                .expect("failed to add membership");
+            let is_leader = position == 0;
+            let peer_addr = peers
+                .into_iter()
+                .filter(|m| m.key_str().unwrap() != me.to_string())
+                .map(|m| m.value_str().unwrap().to_owned())
+                .collect::<Vec<String>>();
+            log::info!("is_leader={is_leader} peer_addr={peer_addr:?}");
+            (me, is_leader, peer_addr, Some(etcd_client))
+        } else {
+            (0, false, Vec::new(), None)
+        };
 
         let this = Self {
             inner: Arc::new(kv),
@@ -119,6 +134,7 @@ impl KVHandle {
         let mut f = peers
             .into_iter()
             .map(|peer| async move {
+                log::info!("update follower key={key} value={value:?} peer={peer}");
                 let mut cli = PeersClient::connect(peer)
                     .await
                     .expect("failed to connect to peer");
@@ -132,14 +148,6 @@ impl KVHandle {
             })
             .collect::<FuturesUnordered<_>>();
         while f.next().await.is_some() {}
-    }
-}
-
-impl Drop for KVHandle {
-    fn drop(&mut self) {
-        members::delete(&self.etcd_client, self.me.to_owned())
-            .wait()
-            .expect("failed to delete membership");
     }
 }
 

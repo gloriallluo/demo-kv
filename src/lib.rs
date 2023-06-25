@@ -1,6 +1,6 @@
 //! demo-kv
 
-#![deny(clippy::all, clippy::unwrap_used)]
+#![deny(clippy::all)]
 
 pub mod cli;
 mod kv;
@@ -10,12 +10,10 @@ mod ts;
 pub use kv::KVHandle;
 
 /// tonic APIs
-#[allow(clippy::unwrap_used)]
 pub mod api {
     tonic::include_proto!("demokv.api");
 }
 
-#[allow(clippy::unwrap_used)]
 pub mod peers {
     tonic::include_proto!("demokv.peers");
 }

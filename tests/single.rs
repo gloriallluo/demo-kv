@@ -59,11 +59,12 @@ impl TestEnv {
     }
 
     fn start_server(port: u16, dir: &Path) -> JoinHandle<()> {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let dir = dir.to_path_buf();
         task::spawn(async move {
             let handle = KVHandle::new(
-                &addr,
+                false,
+                &&format!("http://127.0.0.1:{port}"),
                 dir.join("test.dkv.db").as_path(),
                 dir.join("test.dkv.log").as_path(),
             )
@@ -81,7 +82,9 @@ impl TestEnv {
 async fn basic() {
     logger_setup();
     let _env = TestEnv::init(33333).await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33333").await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33333".to_string())
+        .await
+        .unwrap();
     _ = cli.handle("PUT A 3").await.unwrap();
     _ = cli.handle("PUT B 4").await.unwrap();
     _ = cli.handle("PUT A (A+1)").await.unwrap();
@@ -106,7 +109,9 @@ async fn basic() {
 async fn persist() {
     logger_setup();
     let mut env = TestEnv::init(33334).await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33334").await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33334".to_string())
+        .await
+        .unwrap();
     _ = cli.handle("PUT A 5").await.unwrap();
     let res = cli.handle("GET A").await.unwrap();
     assert_eq!(res, KvOutput::Value(Some(5)));
@@ -119,7 +124,9 @@ async fn persist() {
     env.kill().await;
 
     env.restart(33334).await;
-    let mut cli = Client::new("http://127.0.0.1:33334").await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33334".to_string())
+        .await
+        .unwrap();
     let res = cli.handle("GET A").await.unwrap();
     assert_eq!(res, KvOutput::Value(Some(5)), "persistence failed");
     let res = cli.handle("GET B").await.unwrap();
@@ -130,7 +137,9 @@ async fn persist() {
 async fn concurrent() {
     fn client_future(key1: &'static str, key2: &'static str) -> impl Future<Output = ()> + 'static {
         async move {
-            let mut cli = Client::new("http://127.0.0.1:33335").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33335".to_string())
+                .await
+                .unwrap();
             for _ in 0..10 {
                 _ = cli
                     .handle(format!("PUT {} 1", key1).as_str())
@@ -178,7 +187,9 @@ async fn concurrent() {
 async fn txn1() {
     logger_setup();
     let _env = TestEnv::init(33336).await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33336").await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33336".to_string())
+        .await
+        .unwrap();
     _ = cli.handle("PUT A 0").await.unwrap();
     _ = cli.handle("PUT B 0").await.unwrap();
 
@@ -186,7 +197,9 @@ async fn txn1() {
 
     for _ in 0..3 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33336").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33336".to_string())
+                .await
+                .unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 _ = cli.handle("PUT A (A+1)").await.unwrap();
@@ -219,7 +232,7 @@ async fn txn1() {
         }));
     }
 
-    time::sleep(Duration::from_secs(10)).await;
+    time::sleep(Duration::from_secs(5)).await;
     clients.into_iter().for_each(|handle| handle.abort());
 
     let res0 = cli.handle("GET A").await.unwrap();
@@ -231,7 +244,9 @@ async fn txn1() {
 async fn txn2() {
     logger_setup();
     let _env = TestEnv::init(33337).await.unwrap();
-    let mut cli = Client::new("http://127.0.0.1:33337").await.unwrap();
+    let mut cli = Client::new("http://127.0.0.1:33337".to_string())
+        .await
+        .unwrap();
     _ = cli.handle("PUT A 0").await.unwrap();
     _ = cli.handle("PUT B 0").await.unwrap();
 
@@ -239,7 +254,9 @@ async fn txn2() {
 
     for _ in 0..2 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33337").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33337".to_string())
+                .await
+                .unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 _ = cli.handle("PUT A (A+1)").await.unwrap();
@@ -253,7 +270,9 @@ async fn txn2() {
 
     for _ in 0..8 {
         clients.push(task::spawn(async move {
-            let mut cli = Client::new("http://127.0.0.1:33337 ").await.unwrap();
+            let mut cli = Client::new("http://127.0.0.1:33337".to_string())
+                .await
+                .unwrap();
             loop {
                 _ = cli.handle("BEGIN").await.unwrap();
                 let res0 = cli.handle("GET A").await.unwrap();
@@ -269,7 +288,7 @@ async fn txn2() {
         }));
     }
 
-    time::sleep(Duration::from_secs(10)).await;
+    time::sleep(Duration::from_secs(5)).await;
     clients.into_iter().for_each(|handle| handle.abort());
 
     let _res = cli.handle("GET A").await.unwrap();

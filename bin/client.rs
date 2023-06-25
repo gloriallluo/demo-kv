@@ -9,7 +9,7 @@ use std::io;
 async fn main() -> Result<(), Box<dyn StdError>> {
     env_logger::init();
 
-    let mut client = Client::new("http://127.0.0.1:33333").await?;
+    let mut client = Client::new("http://127.0.0.1:33333".to_string()).await?;
     let mut buffer = String::new();
 
     while io::stdin().read_line(&mut buffer).is_ok() {

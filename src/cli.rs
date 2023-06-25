@@ -135,7 +135,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn new(addr: &'static str) -> Result<Self, Box<dyn StdError>> {
+    pub async fn new(addr: String) -> Result<Self, Box<dyn StdError>> {
         let kv_client = KvClient::connect(addr).await?;
         Ok(Self {
             kv_client,
