@@ -325,12 +325,10 @@ impl Kv for KVHandle {
 
         // Lock and validate
         for (key, _) in write_set.iter() {
-            log::trace!("before lock {key}");
             if !self.inner.lock(key, txn_id) {
                 commit = false;
                 break;
             }
-            log::trace!("acquire lock {key}");
             if !self.inner.validate(key, start_ts) {
                 commit = false;
                 break;

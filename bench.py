@@ -62,6 +62,7 @@ if __name__ == '__main__':
         time.sleep(60)
         for p in clients:
             p.kill()
+        time.sleep(2)
         c1 = start_client(args.mode, test_dir / "testcase4-3.txt")
         c1.wait()
 
@@ -78,6 +79,7 @@ if __name__ == '__main__':
         time.sleep(60)
         for p in clients:
             p.kill()
+        time.sleep(2)
         c1 = start_client(args.mode, test_dir / "testcase5-4.txt")
         c1.wait()
 

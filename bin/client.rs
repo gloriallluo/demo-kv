@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
             break;
         }
         match client.handle(buffer.as_str()).await? {
-            KvOutput::Value(v) => println!("got {v:?}"),
+            KvOutput::Value(v) => println!("{v:?}"),
             KvOutput::Commit => println!("commit"),
             KvOutput::Abort => println!("abort"),
             _ => {}
