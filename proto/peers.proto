@@ -15,6 +15,8 @@ message UpdateArg {
 
 message UpdateReply {}
 
-message SnapshotArg {}
+message SnapshotArg {
+    string message = 1;
+}
 
 message SnapshotReply {}

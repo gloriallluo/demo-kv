@@ -2,7 +2,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -39,8 +39,7 @@ impl Logger {
             log::info!("crate log file {log_path:?}");
             File::create(log_path).expect("failed to create log file")
         };
-        file.seek(std::io::SeekFrom::Start(0))
-            .expect("failed to seek");
+        file.seek(SeekFrom::Start(0)).expect("failed to seek");
         Arc::new(Self {
             log_file: Mutex::new(file),
         })
@@ -48,6 +47,7 @@ impl Logger {
 
     pub(crate) fn restore(self: &Arc<Self>, state: &impl Loggable) {
         let mut f = self.log_file.lock().expect("log file lock poisoned");
+        f.seek(SeekFrom::Start(0)).expect("failed to seek");
         let mut u32_arr: [u8; 4] = [0; 4];
         let mut max_ts = 0;
         while f.read_exact(&mut u32_arr[..]).is_ok() {

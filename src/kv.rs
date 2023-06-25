@@ -13,7 +13,7 @@ use crate::{
     ts::TS_MANAGER,
 };
 use concurrent_map::ConcurrentMap;
-use etcd_client::{Client as EtcdClient, GetOptions};
+use etcd_client::{Client as EtcdClient, EventType, GetOptions, WatchOptions};
 use futures::{stream::FuturesUnordered, StreamExt};
 use std::{
     collections::HashMap,
@@ -31,11 +31,12 @@ use tonic::{Request, Response, Status};
 #[derive(Clone)]
 pub struct KVHandle {
     inner: Arc<KVInner>,
-    /// etcd id
-    me: u64,
+    #[allow(dead_code)]
+    me: u128,
     is_leader: Arc<AtomicBool>,
     etcd_client: Option<EtcdClient>,
     peer_addr: Arc<RwLock<Vec<String>>>,
+    logger: Arc<Logger>,
 }
 
 impl KVHandle {
@@ -58,41 +59,60 @@ impl KVHandle {
         // Replay log.
         logger.restore(&kv);
 
-        let (me, is_leader, peer_addr, etcd_client) = if distributed {
+        let (me, is_leader, peer_addr, etcd_client, lease_id) = if distributed {
             // etcd stuff
             let mut etcd_client = EtcdClient::connect(&["http://127.0.0.1:2379"], None)
                 .await
                 .expect("failed to connect to etcd");
-            let me = rand::random::<u64>();
+            let me = rand::random::<u128>();
             etcd_client
-                .put(me.to_string(), peer_addr.to_string(), None)
+                .put(format!("member-{me}"), peer_addr.to_string(), None)
                 .await
                 .expect("failed to add membership");
             time::sleep(Duration::from_millis(200)).await;
             let peers_resp = etcd_client
-                .get("", Some(GetOptions::new().with_all_keys()))
+                .get("member", Some(GetOptions::new().with_prefix()))
                 .await
                 .expect("failed to ask membership");
             let peers = peers_resp.kvs();
             let position = peers
                 .iter()
-                .position(|m| m.key_str().unwrap() == me.to_string())
+                .position(|kv| kv.key_str().unwrap() == format!("member-{me}"))
                 .expect("failed to add membership");
-            let is_leader = position == 0;
+            let is_leader = if etcd_client.leader("leader").await.is_err() {
+                position == 0
+            } else {
+                false
+            };
+            let lease_id = if is_leader {
+                let lease_id = etcd_client
+                    .lease_grant(65, None)
+                    .await
+                    .expect("failed to create lease")
+                    .id();
+                etcd_client
+                    .campaign("leader", me.to_string(), lease_id)
+                    .await
+                    .expect("failed to promote leader");
+                Some(lease_id)
+            } else {
+                None
+            };
             let peer_addr = peers
                 .into_iter()
-                .filter(|m| m.key_str().unwrap() != me.to_string())
+                .filter(|m| m.key_str().unwrap() != format!("member-{me}"))
                 .map(|m| m.value_str().unwrap().to_owned())
                 .collect::<Vec<String>>();
             log::info!("is_leader={is_leader} peer_addr={peer_addr:?}");
-            (me, is_leader, peer_addr, Some(etcd_client))
+            (me, is_leader, peer_addr, Some(etcd_client), lease_id)
         } else {
-            (0, false, Vec::new(), None)
+            (0, false, Vec::new(), None, None)
         };
 
         let this = Self {
             inner: Arc::new(kv),
             me,
+            logger,
             is_leader: Arc::new(AtomicBool::new(is_leader)),
             etcd_client,
             peer_addr: Arc::new(RwLock::new(peer_addr)),
@@ -107,6 +127,59 @@ impl KVHandle {
                 that.persist(&path).await;
             }
         });
+
+        // Spawn a task that does lease renew.
+        if is_leader {
+            let mut that = this.clone();
+            task::spawn(async move {
+                if let Some(etcd) = &mut that.etcd_client {
+                    loop {
+                        time::sleep(Duration::from_secs(60)).await;
+                        etcd.lease_keep_alive(lease_id.unwrap())
+                            .await
+                            .expect("failed to keep alive")
+                            .0
+                            .keep_alive()
+                            .await
+                            .expect("failed to keep alive");
+                    }
+                }
+            });
+        }
+
+        // For leaders, spawn a task to watch membership change.
+        if is_leader {
+            let mut that = this.clone();
+            task::spawn(async move {
+                if let Some(etcd) = &mut that.etcd_client {
+                    let (_watcher, mut stream) = etcd
+                        .watch("member", Some(WatchOptions::new().with_prefix()))
+                        .await
+                        .expect("failed to watch membership change");
+                    while let Some(resp) = stream.message().await.unwrap() {
+                        for ev in resp.events() {
+                            if ev.event_type() == EventType::Put {
+                                let kv = ev.kv().unwrap();
+                                let peer = kv.value_str().unwrap().to_owned();
+                                log::info!("watch: new peer={peer}");
+                                that.peer_addr.write().unwrap().push(peer.clone());
+                                time::sleep(Duration::from_millis(500)).await;
+                                let mut cli = PeersClient::connect(peer)
+                                    .await
+                                    .expect("failed to connect to peer");
+                                let snapshot = that.take_snapshot();
+                                let message = bincode::serialize(&snapshot).unwrap();
+                                let arg = SnapshotArg {
+                                    message: unsafe { String::from_utf8_unchecked(message) },
+                                };
+                                cli.snapshot(arg).await.expect("failed to install snapshot");
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         this
     }
 
@@ -119,6 +192,10 @@ impl KVHandle {
     /// Dump snapshot.
     async fn persist(&self, _path: &Path) {
         // TODO(snapshot) persist
+    }
+
+    fn take_snapshot(&self) -> HashMap<(String, usize), Option<i64>> {
+        self.inner.data.iter().collect()
     }
 
     /// update followers
@@ -185,7 +262,8 @@ impl Kv for KVHandle {
         let IncArg { key, key1, value } = req.into_inner();
         log::debug!("Inc - {key}+={value}");
         let ts = TS_MANAGER.new_ts();
-        let reply = if let Some(orig) = self.inner.get(key1, ts) {
+        let reply = if let Some(orig) = self.inner.get(key1, usize::MAX) {
+            log::info!("orig={orig} value={value} ts={ts}");
             self.update_followers(&key, Some(orig + value), ts).await;
             self.inner.update(key, Some(orig + value), ts);
             IncReply { has_value: true }
@@ -299,16 +377,32 @@ impl Peers for KVHandle {
             value,
         } = req.into_inner();
         let value = has_value.then_some(value);
+        let ts = ts as usize;
         self.inner.update(key, value, ts as usize);
+        TS_MANAGER.set_ts(ts);
         let reply = UpdateReply {};
         Ok(Response::new(reply))
     }
 
     async fn snapshot(
         &self,
-        _req: Request<SnapshotArg>,
+        req: Request<SnapshotArg>,
     ) -> Result<Response<SnapshotReply>, tonic::Status> {
-        todo!("snapshot")
+        let SnapshotArg { message } = req.into_inner();
+        let message = message.into_bytes();
+        let kvs: HashMap<(String, usize), Option<i64>> =
+            bincode::deserialize(&message[..]).unwrap();
+        let mut max_ts = 0;
+        for ((key, ts), value) in kvs {
+            log::info!("snapshot key={key} ts={ts} value={value:?}");
+            self.inner.update(key, value, ts);
+            if ts > max_ts {
+                max_ts = ts;
+            }
+        }
+        TS_MANAGER.set_ts(max_ts);
+        let reply = SnapshotReply {};
+        Ok(Response::new(reply))
     }
 }
 
@@ -317,7 +411,7 @@ type KeyVersion = (String, usize);
 /// Real KV instance.
 #[derive(Debug)]
 struct KVInner {
-    data: ConcurrentMap<KeyVersion, Option<i64>>, // TODO(gc)
+    data: ConcurrentMap<KeyVersion, Option<i64>>,
     logger: Arc<Logger>,
 }
 

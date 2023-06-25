@@ -39,6 +39,21 @@ impl TestEnv {
         Self { dirs, servers }
     }
 
+    async fn add_node(&mut self) {
+        let i = self.dirs.len() as u16;
+        let dir = tempdir().unwrap();
+        let task = Self::start_server(33333 + i, dir.path());
+        self.dirs.push(dir);
+        self.servers.push(task);
+        time::sleep(Duration::from_secs(2)).await;
+    }
+
+    async fn kill_node(&mut self) {
+        let i = rand::random::<usize>() % self.dirs.len();
+        self.servers.remove(i);
+        self.dirs.remove(i);
+    }
+
     fn start_server(port: u16, dir: &Path) -> JoinHandle<()> {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
         let dir = dir.to_path_buf();
@@ -63,13 +78,54 @@ impl TestEnv {
 #[madsim::test]
 async fn distributed() {
     env_logger::init();
-    let _env = TestEnv::init(3).await;
+    let mut env = TestEnv::init(3).await;
 
     let mut etcd_client = EtcdClient::connect(["http://127.0.0.1:2379"], None)
         .await
         .unwrap();
     let members = etcd_client
-        .get("", Some(GetOptions::new().with_all_keys()))
+        .get("member", Some(GetOptions::new().with_prefix()))
+        .await
+        .unwrap();
+    let leader_resp = etcd_client
+        .leader("leader")
+        .await
+        .expect("failed to ask leader");
+    let leader_id = leader_resp.kv().unwrap().value_str().unwrap();
+    let leader_id = members
+        .kvs()
+        .iter()
+        .position(|kv| kv.key_str().unwrap() == format!("member-{leader_id}"))
+        .unwrap();
+    let members = members
+        .kvs()
+        .iter()
+        .map(|kv| kv.value_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let leader_addr = members[leader_id].clone();
+
+    let mut cli = vec![];
+    for m in members {
+        cli.push(Client::new(m).await.unwrap());
+    }
+    let mut leader = Client::new(leader_addr).await.unwrap();
+    _ = leader.handle("PUT A 0").await.unwrap();
+    _ = leader.handle("PUT B 0").await.unwrap();
+    _ = leader.handle("PUT A (A+1)").await.unwrap();
+    _ = leader.handle("PUT B (B+1)").await.unwrap();
+    _ = leader.handle("PUT A (A+1)").await.unwrap();
+
+    for i in 0..3 {
+        let res = cli[i].handle("GET A").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(2)));
+        let res = cli[i].handle("GET B").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(1)));
+    }
+
+    env.add_node().await;
+
+    let members = etcd_client
+        .get("member", Some(GetOptions::new().with_prefix()))
         .await
         .unwrap();
     let members = members
@@ -77,29 +133,26 @@ async fn distributed() {
         .iter()
         .map(|kv| kv.value_str().unwrap().to_owned())
         .collect::<Vec<_>>();
+    let mut cli = vec![];
+    for m in members {
+        cli.push(Client::new(m).await.unwrap());
+    }
 
-    let mut cli = Client::new(members[0].clone()).await.unwrap();
-    _ = cli.handle("PUT A 0").await.unwrap();
-    _ = cli.handle("PUT B 0").await.unwrap();
-    _ = cli.handle("PUT A (A+1)").await.unwrap();
-    _ = cli.handle("PUT B (B+1)").await.unwrap();
-    _ = cli.handle("PUT A (A+1)").await.unwrap();
+    for i in 0..4 {
+        let res = cli[i].handle("GET A").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(2)));
+        let res = cli[i].handle("GET B").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(1)));
+    }
 
-    let mut cli1 = Client::new(members[1].clone()).await.unwrap();
-    let mut cli2 = Client::new(members[2].clone()).await.unwrap();
+    _ = leader.handle("PUT A (A+1)").await.unwrap();
+    _ = leader.handle("PUT B (B+1)").await.unwrap();
+    _ = leader.handle("PUT A (A+1)").await.unwrap();
 
-    let res = cli.handle("GET A").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(2)));
-    let res = cli.handle("GET B").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(1)));
-
-    let res = cli1.handle("GET A").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(2)));
-    let res = cli1.handle("GET B").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(1)));
-
-    let res = cli2.handle("GET A").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(2)));
-    let res = cli2.handle("GET B").await.unwrap();
-    assert_eq!(res, KvOutput::Value(Some(1)));
+    for i in 0..4 {
+        let res = cli[i].handle("GET A").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(4)));
+        let res = cli[i].handle("GET B").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(2)));
+    }
 }
