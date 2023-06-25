@@ -238,6 +238,7 @@ async fn txn1() {
     let res0 = cli.handle("GET A").await.unwrap();
     let res1 = cli.handle("GET B").await.unwrap();
     assert_eq!(res0, res1);
+    log::info!("A={res0:?} B={res1:?}");
 }
 
 #[madsim::test]
@@ -291,6 +292,7 @@ async fn txn2() {
     time::sleep(Duration::from_secs(5)).await;
     clients.into_iter().for_each(|handle| handle.abort());
 
-    let _res = cli.handle("GET A").await.unwrap();
-    let _res = cli.handle("GET B").await.unwrap();
+    let res_a = cli.handle("GET A").await.unwrap();
+    let res_b = cli.handle("GET B").await.unwrap();
+    log::info!("A={res_a:?} B={res_b:?}");
 }

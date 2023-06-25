@@ -44,7 +44,7 @@ if __name__ == '__main__':
     tests = range(1, 7) if args.all else args.tests
 
     serv = start_server(args.mode)
-    time.sleep(0.2)
+    time.sleep(1)
 
     for tid in tests:
         files = get_test_files(test_dir, tid)

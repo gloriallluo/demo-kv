@@ -31,7 +31,7 @@ impl TestEnv {
         let mut servers = vec![];
         for i in 0..n {
             let dir = tempdir().unwrap();
-            let task = Self::start_server(33333 + i, dir.path());
+            let task = Self::start_server(13333 + i, dir.path());
             dirs.push(dir);
             servers.push(task);
         }
@@ -42,16 +42,16 @@ impl TestEnv {
     async fn add_node(&mut self) {
         let i = self.dirs.len() as u16;
         let dir = tempdir().unwrap();
-        let task = Self::start_server(33333 + i, dir.path());
+        let task = Self::start_server(13333 + i, dir.path());
         self.dirs.push(dir);
         self.servers.push(task);
         time::sleep(Duration::from_secs(2)).await;
     }
 
-    async fn kill_node(&mut self) {
-        let i = rand::random::<usize>() % self.dirs.len();
+    async fn kill_node(&mut self, i: usize) {
         self.servers.remove(i);
         self.dirs.remove(i);
+        time::sleep(Duration::from_millis(1)).await;
     }
 
     fn start_server(port: u16, dir: &Path) -> JoinHandle<()> {
@@ -150,6 +150,19 @@ async fn distributed() {
     _ = leader.handle("PUT A (A+1)").await.unwrap();
 
     for i in 0..4 {
+        let res = cli[i].handle("GET A").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(4)));
+        let res = cli[i].handle("GET B").await.unwrap();
+        assert_eq!(res, KvOutput::Value(Some(2)));
+    }
+
+    let victim = rand::random::<usize>() % 4;
+    env.kill_node(victim).await;
+
+    for i in 0..4 {
+        if i == victim {
+            continue;
+        }
         let res = cli[i].handle("GET A").await.unwrap();
         assert_eq!(res, KvOutput::Value(Some(4)));
         let res = cli[i].handle("GET B").await.unwrap();

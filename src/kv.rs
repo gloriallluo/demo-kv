@@ -36,7 +36,6 @@ pub struct KVHandle {
     is_leader: Arc<AtomicBool>,
     etcd_client: Option<EtcdClient>,
     peer_addr: Arc<RwLock<Vec<String>>>,
-    logger: Arc<Logger>,
 }
 
 impl KVHandle {
@@ -99,7 +98,7 @@ impl KVHandle {
                 None
             };
             let peer_addr = peers
-                .into_iter()
+                .iter()
                 .filter(|m| m.key_str().unwrap() != format!("member-{me}"))
                 .map(|m| m.value_str().unwrap().to_owned())
                 .collect::<Vec<String>>();
@@ -112,7 +111,6 @@ impl KVHandle {
         let this = Self {
             inner: Arc::new(kv),
             me,
-            logger,
             is_leader: Arc::new(AtomicBool::new(is_leader)),
             etcd_client,
             peer_addr: Arc::new(RwLock::new(peer_addr)),
@@ -378,7 +376,7 @@ impl Peers for KVHandle {
         } = req.into_inner();
         let value = has_value.then_some(value);
         let ts = ts as usize;
-        self.inner.update(key, value, ts as usize);
+        self.inner.update(key, value, ts);
         TS_MANAGER.set_ts(ts);
         let reply = UpdateReply {};
         Ok(Response::new(reply))
